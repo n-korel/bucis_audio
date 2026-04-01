@@ -1,0 +1,176 @@
+## AnnouncerSimulator
+
+**Симулятор синхронных аудиообъявлений**
+
+Проект имитирует работу аудиоподсистемы системы «Сармат» с помощью UDP broadcast.
+
+Проект моделирует **синхронный старт воспроизведения** на нескольких узлах в одной подсети через **UDP broadcast** с разделением на:
+
+- **control-plane**: управляющие UDP-команды `sound_start` / `sound_stop`
+- **media-plane**: RTP/UDP поток с аудио (G.726)
+
+---
+
+## 1. Архитектура
+
+### Принцип разделения
+
+- **BUCIS** — инициатор. Читает `audio/dcwarning.mp3`, декодирует его в PCM (Pulse-code modulation), кодирует в G.726 и рассылает RTP-пакеты. Перед стартом RTP отправляет `sound_start` по broadcast с таймстампом \(t0\) — чтобы получатели синхронно начали приём в заданный момент.
+- **BRS** — получатель. По команде `sound_start` планирует старт медиаприёмника на момент \(t0\). Ровно в \(t0\) открывает UDP-сокет для media-plane и принимает RTP-пакеты, декодирует G.726 в PCM (PCM отбрасывается — ALSA недоступен), собирает метрики: число принятых пакетов, потери, jitter.
+
+### Два канала
+
+| Канал         | Порт | Протокол                          | Направление | Содержание                  |
+| ------------- | ---- | --------------------------------- | ----------- | --------------------------- |
+| Control-plane | 8889 | UDP broadcast                     | BUCIS → BRS | `sound_start`, `sound_stop` |
+| Media-plane   | 5006 | RTP/UDP broadcast `192.168.1.255` | BUCIS → BRS | G.726 32 kbit/s             |
+
+### Топология
+
+```mermaid
+graph TB
+    subgraph Central["Голова поезда"]
+        BUCIS[BUCIS]
+    end
+
+    subgraph Receivers1["ВАГОН-1"]
+        BRS1[BRS-1]
+    end
+
+
+
+    BUCIS -->|"broadcast 192.168.1.255:8889
+    sound_start / sound_stop"| BRS1
+
+
+    BUCIS -->|"broadcast 192.168.1.255:5006
+    RTP G.726"| BRS1
+
+```
+
+Оба канала используют один broadcast-адрес (например `192.168.1.255`). Для control-plane `brs` биндится на `CONTROL_ADDR:CONTROL_PORT` и читает входящие команды. Для media-plane `brs` слушает `0.0.0.0:MEDIA_PORT` только во время активной сессии (после наступления \(t0\)).
+
+---
+
+## 2. Роли узлов
+
+- **`bucis`** (инициатор)
+  - читает MP3 (`audio/dcwarning.mp3` по умолчанию)
+  - декодирует в PCM, ресемплит в 8 kHz mono
+  - кодирует PCM в **G.726 (ADPCM 4-bit)**
+  - отправляет `sound_start` с таймстампом \(t0 = now + offset\) по broadcast (1 раз на сессию)
+  - ровно в \(t0\) начинает слать **RTP** (20 мс фреймы) по broadcast на media-порт
+  - по завершении отправляет `sound_stop`
+
+- **`brs`** (получатель)
+  - слушает broadcast control-plane
+  - по `sound_start` планирует старт приёма на момент \(t0\)
+  - принимает RTP, декодирует G.726 → PCM (PCM отбрасывается)
+  - собирает статистику сессии: `received / expected / lost / jitter_ms`
+  - по `sound_stop` останавливает приём и печатает итоговые метрики
+  - если RTP не приходит \(\approx 1\) секунду во время активной сессии — сессия автоматически завершается по таймауту и печатаются метрики
+
+### Два канала (порты/протоколы)
+
+| Канал         |   Порт | Протокол          | Направление   | Содержимое                  |
+| ------------- | -----: | ----------------- | ------------- | --------------------------- |
+| Control-plane | `8889` | UDP broadcast     | `bucis → brs` | `sound_start`, `sound_stop` |
+| Media-plane   | `5006` | RTP/UDP broadcast | `bucis → brs` | G.726 payload (PT=2)        |
+
+---
+
+## 3. Протокол
+
+### Control-plane (UDP, порт `8889`)
+
+- **`sound_start <t0_ms>;<session_id>;`**
+  - `t0_ms` — Unix timestamp в миллисекундах (когда начинать приём/передачу)
+  - `session_id` — опционально (в симуляторе генерируется как 8 hex-символов)
+- **`sound_stop`**
+  - остановка текущей сессии (аргументы, если есть, будут проигнорированы приёмником)
+
+### Media-plane (RTP/UDP, порт `5006`)
+
+RTP (v2) с параметрами:
+
+- **Sample rate**: 8000 Hz
+- **Frame**: 20 ms
+- **Samples per frame**: 160
+- **Payload type**: `2` (используется как «G.726» в симуляторе)
+
+Один RTP-пакет соответствует 20 мс аудио:
+160 сэмплов × 4 бита = **80 байт payload**.
+
+---
+
+## 4. Поток выполнения
+
+```mermaid
+sequenceDiagram
+    participant BUCIS
+    participant BRS
+
+    BUCIS->>BRS: sound_start
+
+    BRS->>BRS: schedule PLAY
+
+    BRS->>BRS: PLAY
+
+    loop RTP stream
+        BUCIS->>BRS: RTP
+    end
+
+    BUCIS->>BRS: sound_stop
+```
+
+**Синхронизация:** BRS может получить `sound_start` в разное время, но все активируют медиаприёмник ровно в `t0` — за счёт единого timestamp в команде.
+
+---
+
+## 5. Конфигурация
+
+### Переменные окружения
+
+Общие (для `bucis` и `brs`):
+
+- **`CONTROL_ADDR`**: broadcast-адрес подсети (например `192.168.1.255`)
+  - для `bucis`: **обязателен**
+  - для `brs`: если не задан, используется **`192.168.1.255`** (автоопределения broadcast-адреса подсети сейчас нет)
+- **`CONTROL_PORT`**: UDP порт control-plane
+  - для `bucis`: **обязателен**
+  - для `brs`: default `8889`
+- **`MEDIA_PORT`**: UDP порт media-plane (RTP)
+  - для `bucis`: **обязателен**
+  - для `brs`: default `5006`
+
+Для `bucis`:
+
+- **`CONTROL_OFFSET_MS`** (или `OFFSET_MS`): задержка до \(t0\) в мс (**обязательна**, должно быть `> 0`)
+- **`CONTROL_SEND_INTERVAL_MS`** (или `SEND_INTERVAL_MS`): пауза между сессиями в мс (**обязательна**, должно быть `> 0`)
+- **`AUDIO_FILE`**: путь к MP3 (**обязателен**)
+
+Для `brs`:
+
+- **`BRS_NAME`**: имя узла в логах, default `brs`
+
+### CLI-флаги
+
+Флаги имеют приоритет над переменными окружения.
+
+`bucis`:
+
+```
+--control-addr   broadcast-адрес
+--control-port   UDP порт control-plane
+--media-port     UDP порт media-plane
+--offset-ms      задержка до t0
+--audio-file     путь к MP3
+```
+
+`brs`:
+
+```
+--control-addr   broadcast-адрес
+--control-port   UDP порт control-plane
+--media-port     UDP порт media-plane
+```
