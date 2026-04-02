@@ -25,6 +25,24 @@ func TestLatePacketDoesNotIncreaseCycles(t *testing.T) {
 	}
 }
 
+func TestLatePacketWithNewerTimestampAfterSourceResetDoesNotIncreaseCycles(t *testing.T) {
+	r := &Receiver{playing: true}
+
+	r.updateStats(40000, 1000)
+	r.updateStats(50000, 2000)
+	r.updateStats(1000, 3000)
+
+	if r.stats.Cycles != 0 {
+		t.Fatalf("expected Cycles=0, got %d", r.stats.Cycles)
+	}
+	if r.stats.MaxSeq != 50000 {
+		t.Fatalf("expected MaxSeq=50000, got %d", r.stats.MaxSeq)
+	}
+	if got, want := r.stats.Expected(), uint32(10001); got != want {
+		t.Fatalf("expected Expected=%d, got %d", want, got)
+	}
+}
+
 func TestWrapSequenceIncreasesCycles(t *testing.T) {
 	r := &Receiver{playing: true}
 

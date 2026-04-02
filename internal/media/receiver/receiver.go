@@ -14,6 +14,7 @@ import (
 const (
 	readTimeout = 200 * time.Millisecond
 	rtpTickNs   = int64(125000)
+	maxWrapForwardGap = 10000
 )
 
 type SessionStats struct {
@@ -57,6 +58,10 @@ type Receiver struct {
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 	stats   SessionStats
+	runErr  error
+
+	connMu sync.Mutex
+	conn   *net.UDPConn
 }
 
 func New(mediaPort int) *Receiver {
@@ -65,44 +70,67 @@ func New(mediaPort int) *Receiver {
 	}
 }
 
-func (r *Receiver) Start() {
+func (r *Receiver) Start() error {
 	r.mu.Lock()
 	if r.playing {
 		r.mu.Unlock()
-		return
+		return nil
+	}
+	laddr := &net.UDPAddr{IP: net.IPv4zero, Port: r.mediaPort}
+	conn, err := net.ListenUDP("udp4", laddr)
+	if err != nil {
+		r.mu.Unlock()
+		return err
 	}
 	r.playing = true
+	r.runErr = nil
 	r.stopCh = make(chan struct{})
 	r.doneCh = make(chan struct{})
 	r.stats = SessionStats{}
+	r.connMu.Lock()
+	r.conn = conn
+	r.connMu.Unlock()
 	stopCh := r.stopCh
 	doneCh := r.doneCh
 	r.mu.Unlock()
 
-	go r.run(stopCh, doneCh)
+	go r.run(conn, stopCh, doneCh)
+	return nil
 }
 
-func (r *Receiver) Stop() SessionStats {
+func (r *Receiver) Stop() (SessionStats, error) {
 	r.mu.Lock()
 	if !r.playing {
 		stats := r.stats
+		err := r.runErr
+		r.runErr = nil
 		r.mu.Unlock()
-		return stats
+		return stats, err
 	}
 	stopCh := r.stopCh
 	doneCh := r.doneCh
 	r.mu.Unlock()
 
 	close(stopCh)
+
+	r.connMu.Lock()
+	c := r.conn
+	r.connMu.Unlock()
+	if c != nil {
+		_ = c.SetReadDeadline(time.Now())
+	}
+
 	<-doneCh
 
 	r.mu.Lock()
 	stats := r.stats
+	err := r.runErr
+	r.runErr = nil
 	r.playing = false
 	r.stopCh = nil
 	r.doneCh = nil
 	r.mu.Unlock()
-	return stats
+	return stats, err
 }
 
 func (r *Receiver) IsPlaying() bool {
@@ -117,15 +145,12 @@ func (r *Receiver) LastPacketAt() time.Time {
 	return r.stats.LastPacket
 }
 
-func (r *Receiver) run(stopCh <-chan struct{}, doneCh chan<- struct{}) {
+func (r *Receiver) run(conn *net.UDPConn, stopCh <-chan struct{}, doneCh chan<- struct{}) {
 	defer close(doneCh)
-
-	laddr := &net.UDPAddr{IP: net.IPv4zero, Port: r.mediaPort}
-	conn, err := net.ListenUDP("udp4", laddr)
-	if err != nil {
-		return
-	}
 	defer func() {
+		r.connMu.Lock()
+		r.conn = nil
+		r.connMu.Unlock()
 		_ = conn.Close()
 	}()
 	_ = conn.SetReadBuffer(1 << 20)
@@ -147,6 +172,9 @@ func (r *Receiver) run(stopCh <-chan struct{}, doneCh chan<- struct{}) {
 				_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 				continue
 			}
+			r.mu.Lock()
+			r.runErr = err
+			r.mu.Unlock()
 			return
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -198,13 +226,18 @@ func (r *Receiver) updateStats(seq uint16, rtpTs uint32) {
 
 	if isNewerTimestamp(rtpTs, r.stats.MaxRTPTs) {
 		extMax := r.stats.Cycles + uint32(r.stats.MaxSeq)
-		cand := r.stats.Cycles + uint32(seq)
-		for cand < extMax {
-			r.stats.Cycles += 1 << 16
-			cand += 1 << 16
+		u0 := r.stats.Cycles + uint32(seq)
+		if u0 > extMax {
+			r.stats.MaxSeq = seq
+			r.stats.MaxRTPTs = rtpTs
+		} else {
+			u1 := u0 + (1 << 16)
+			if u1 > extMax && (u1-extMax) <= maxWrapForwardGap {
+				r.stats.Cycles += 1 << 16
+				r.stats.MaxSeq = seq
+				r.stats.MaxRTPTs = rtpTs
+			}
 		}
-		r.stats.MaxSeq = seq
-		r.stats.MaxRTPTs = rtpTs
 	}
 	r.stats.LastSeq = seq
 	r.stats.Received++

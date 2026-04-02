@@ -52,14 +52,24 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 	ssrc := mediarpt.RandomSSRC()
 	rtpTS := uint32(0)
 
-	ticker := time.NewTicker(mediarpt.FrameDuration)
-	defer ticker.Stop()
-
+	frameTime := start
 	for i := 0; i < len(pcm); i += mediarpt.SamplesPerFrame {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		if d := time.Until(frameTime); d > 0 {
+			t := time.NewTimer(d)
+			select {
+			case <-ctx.Done():
+				if !t.Stop() {
+					<-t.C
+				}
+				return ctx.Err()
+			case <-t.C:
+			}
 		}
 
 		end := i + mediarpt.SamplesPerFrame
@@ -82,14 +92,7 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 
 		seq++
 		rtpTS += mediarpt.SamplesPerFrame
-
-		if end < len(pcm) {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-ticker.C:
-			}
-		}
+		frameTime = frameTime.Add(mediarpt.FrameDuration)
 	}
 	return nil
 }

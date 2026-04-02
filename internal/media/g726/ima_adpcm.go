@@ -36,7 +36,6 @@ func EncodeLinear(sample int16, state *IMAADPCMEncoderState) byte {
 		diff = -diff
 	}
 
-	delta := 0
 	vpdiff := step >> 3
 	if diff >= step {
 		code |= 4
@@ -50,9 +49,8 @@ func EncodeLinear(sample int16, state *IMAADPCMEncoderState) byte {
 	}
 	if diff >= step>>2 {
 		code |= 1
-		delta += step >> 2
+		vpdiff += step >> 2
 	}
-	vpdiff += delta
 
 	if code&8 != 0 {
 		state.predictor -= vpdiff

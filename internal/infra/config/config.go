@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Bucis struct {
@@ -26,7 +27,9 @@ func ParseBucis() (Bucis, error) {
 		return Bucis{}, err
 	}
 
-	offsetMs, err := getEnvInt64FallbackRequired("CONTROL_OFFSET_MS", "OFFSET_MS")
+	offsetMs, err := getEnvFallbackRequired(func(s string) (int64, error) {
+		return strconv.ParseInt(s, 10, 64)
+	}, "int64", "CONTROL_OFFSET_MS", "OFFSET_MS")
 	if err != nil {
 		return Bucis{}, err
 	}
@@ -46,7 +49,7 @@ func ParseBucis() (Bucis, error) {
 		return Bucis{}, err
 	}
 
-	sendIntervalMs, err := getEnvIntFallbackRequired("CONTROL_SEND_INTERVAL_MS", "SEND_INTERVAL_MS")
+	sendIntervalMs, err := getEnvFallbackRequired(strconv.Atoi, "integer", "CONTROL_SEND_INTERVAL_MS", "SEND_INTERVAL_MS")
 	if err != nil {
 		return Bucis{}, err
 	}
@@ -127,38 +130,25 @@ func getEnvIntRequired(key string) (int, error) {
 	return n, nil
 }
 
-func getEnvInt64FallbackRequired(primaryKey, secondaryKey string) (int64, error) {
-	if v, ok := os.LookupEnv(primaryKey); ok && v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err == nil {
-			return n, nil
+func getEnvFallbackRequired[T int | int64](parse func(string) (T, error), typeDesc string, keys ...string) (T, error) {
+	var zero T
+	for _, key := range keys {
+		if v, ok := os.LookupEnv(key); ok && v != "" {
+			n, err := parse(v)
+			if err == nil {
+				return n, nil
+			}
+			return zero, fmt.Errorf("%s must be a valid %s: %w", key, typeDesc, err)
 		}
-		return 0, fmt.Errorf("%s must be a valid int64: %w", primaryKey, err)
 	}
-	if v, ok := os.LookupEnv(secondaryKey); ok && v != "" {
-		n, err := strconv.ParseInt(v, 10, 64)
-		if err == nil {
-			return n, nil
-		}
-		return 0, fmt.Errorf("%s must be a valid int64: %w", secondaryKey, err)
+	switch len(keys) {
+	case 0:
+		return zero, fmt.Errorf("no environment variable keys provided")
+	case 1:
+		return zero, fmt.Errorf("%s is required (set it in .env or environment)", keys[0])
+	case 2:
+		return zero, fmt.Errorf("%s (or %s) is required (set it in .env or environment)", keys[0], keys[1])
+	default:
+		return zero, fmt.Errorf("one of %s is required (set it in .env or environment)", strings.Join(keys, ", "))
 	}
-	return 0, fmt.Errorf("%s (or %s) is required (set it in .env or environment)", primaryKey, secondaryKey)
-}
-
-func getEnvIntFallbackRequired(primaryKey, secondaryKey string) (int, error) {
-	if v, ok := os.LookupEnv(primaryKey); ok && v != "" {
-		n, err := strconv.Atoi(v)
-		if err == nil {
-			return n, nil
-		}
-		return 0, fmt.Errorf("%s must be a valid integer: %w", primaryKey, err)
-	}
-	if v, ok := os.LookupEnv(secondaryKey); ok && v != "" {
-		n, err := strconv.Atoi(v)
-		if err == nil {
-			return n, nil
-		}
-		return 0, fmt.Errorf("%s must be a valid integer: %w", secondaryKey, err)
-	}
-	return 0, fmt.Errorf("%s (or %s) is required (set it in .env or environment)", primaryKey, secondaryKey)
 }
