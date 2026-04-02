@@ -3,6 +3,8 @@ package rtp
 import (
 	crand "crypto/rand"
 	"math/rand"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -10,17 +12,43 @@ import (
 )
 
 const (
-	PayloadTypeG726 = 2
-	SampleRate      = 8000
-	SamplesPerFrame = 160
-	FrameDuration   = 20 * time.Millisecond
+	CodecNameIMAADPCM          = "IMA_ADPCM"
+	DefaultPayloadTypeIMAADPCM = uint8(96) // dynamic RTP payload type range
+	SampleRate                 = 8000
+	SamplesPerFrame            = 160
+	FrameDuration              = 20 * time.Millisecond
 )
+
+const envPayloadTypeIMAADPCMKey = "RTP_IMAADPCM_PT"
+
+var (
+	payloadTypeOnce        sync.Once
+	payloadTypeIMAADPCMVal uint8 = DefaultPayloadTypeIMAADPCM
+)
+
+func PayloadTypeIMAADPCM() uint8 {
+	payloadTypeOnce.Do(func() {
+		raw := os.Getenv(envPayloadTypeIMAADPCMKey)
+		if raw == "" {
+			return
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return
+		}
+		if n < int(DefaultPayloadTypeIMAADPCM) || n > 127 {
+			return
+		}
+		payloadTypeIMAADPCMVal = uint8(n)
+	})
+	return payloadTypeIMAADPCMVal
+}
 
 func NewPacket(seq uint16, ts uint32, ssrc uint32, payload []byte) *pionrtp.Packet {
 	return &pionrtp.Packet{
 		Header: pionrtp.Header{
 			Version:        2,
-			PayloadType:    PayloadTypeG726,
+			PayloadType:    PayloadTypeIMAADPCM(),
 			SequenceNumber: seq,
 			Timestamp:      ts,
 			SSRC:           ssrc,

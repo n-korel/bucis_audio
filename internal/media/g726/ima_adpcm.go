@@ -1,4 +1,4 @@
-package g726
+package imaadpcm
 
 var imaIndexTable = [16]int{
 	-1, -1, -1, -1, 2, 4, 6, 8,
@@ -17,17 +17,17 @@ var imaStepTable = [89]int{
 	15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
 }
 
-type EncoderState struct {
+type IMAADPCMEncoderState struct {
 	predictor int
 	index     int
 }
 
-type DecoderState struct {
+type IMAADPCMDecoderState struct {
 	predictor int
 	index     int
 }
 
-func EncodeLinear(sample int16, state *EncoderState) byte {
+func EncodeLinear(sample int16, state *IMAADPCMEncoderState) byte {
 	step := imaStepTable[state.index]
 	diff := int(sample) - state.predictor
 	code := 0
@@ -77,7 +77,7 @@ func EncodeLinear(sample int16, state *EncoderState) byte {
 	return byte(code & 0x0F)
 }
 
-func DecodeLinear(code byte, state *DecoderState) int16 {
+func DecodeLinear(code byte, state *IMAADPCMDecoderState) int16 {
 	c := int(code & 0x0F)
 	step := imaStepTable[state.index]
 
@@ -114,7 +114,7 @@ func DecodeLinear(code byte, state *DecoderState) int16 {
 	return int16(state.predictor)
 }
 
-func EncodeFrame(samples []int16, state *EncoderState) []byte {
+func IMAADPCMEncodeFrame(samples []int16, state *IMAADPCMEncoderState) []byte {
 	out := make([]byte, 0, (len(samples)+1)/2)
 	for i := 0; i < len(samples); i += 2 {
 		lo := EncodeLinear(samples[i], state)
@@ -127,7 +127,7 @@ func EncodeFrame(samples []int16, state *EncoderState) []byte {
 	return out
 }
 
-func DecodeFrame(payload []byte, state *DecoderState) []int16 {
+func IMAADPCMDecodeFrame(payload []byte, state *IMAADPCMDecoderState) []int16 {
 	out := make([]int16, 0, len(payload)*2)
 	for _, b := range payload {
 		lo := b & 0x0F

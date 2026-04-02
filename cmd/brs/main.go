@@ -55,9 +55,7 @@ func (s *sessionState) ScheduleStart(sch scheduler.Scheduler, sessionID string, 
 	}
 	s.sessionID = sessionID
 	s.scheduledT0 = t0
-	s.mu.Unlock()
-
-	timer := sch.Schedule(t0, func() {
+	s.timer = sch.Schedule(t0, func() {
 		s.mu.Lock()
 		if s.sessionID != sessionID {
 			s.mu.Unlock()
@@ -66,14 +64,6 @@ func (s *sessionState) ScheduleStart(sch scheduler.Scheduler, sessionID string, 
 		s.mu.Unlock()
 		fn()
 	})
-
-	s.mu.Lock()
-	if s.sessionID != sessionID {
-		s.mu.Unlock()
-		timer.Stop()
-		return
-	}
-	s.timer = timer
 	s.mu.Unlock()
 }
 

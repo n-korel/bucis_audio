@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"announcer_simulator/internal/media/g726"
+	imaadpcm "announcer_simulator/internal/media/g726"
 	mediarpt "announcer_simulator/internal/media/rtp"
 
 	pionrtp "github.com/pion/rtp"
@@ -13,7 +13,7 @@ import (
 
 const (
 	readTimeout = 200 * time.Millisecond
-	rtpTickNs = int64(125000)
+	rtpTickNs   = int64(125000)
 )
 
 type SessionStats struct {
@@ -25,6 +25,7 @@ type SessionStats struct {
 	Jitter      float64
 	LastArrival int64
 	LastRTPTs   uint32
+	MaxRTPTs    uint32
 	LastPacket  time.Time
 }
 
@@ -131,7 +132,7 @@ func (r *Receiver) run(stopCh <-chan struct{}, doneCh chan<- struct{}) {
 	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 
 	buf := make([]byte, 2048)
-	decState := &g726.DecoderState{}
+	decState := &imaadpcm.IMAADPCMDecoderState{}
 
 	for {
 		select {
@@ -154,11 +155,11 @@ func (r *Receiver) run(stopCh <-chan struct{}, doneCh chan<- struct{}) {
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
 			continue
 		}
-		if pkt.PayloadType != mediarpt.PayloadTypeG726 {
+		if pkt.PayloadType != mediarpt.PayloadTypeIMAADPCM() {
 			continue
 		}
 
-		_ = g726.DecodeFrame(pkt.Payload, decState)
+		_ = imaadpcm.IMAADPCMDecodeFrame(pkt.Payload, decState)
 		r.updateStats(pkt.SequenceNumber, pkt.Timestamp)
 	}
 }
@@ -181,6 +182,7 @@ func (r *Receiver) updateStats(seq uint16, rtpTs uint32) {
 		r.stats.Received = 1
 		r.stats.LastArrival = nowRTPUnits
 		r.stats.LastRTPTs = rtpTs
+		r.stats.MaxRTPTs = rtpTs
 		return
 	}
 
@@ -194,12 +196,20 @@ func (r *Receiver) updateStats(seq uint16, rtpTs uint32) {
 	r.stats.LastArrival = nowRTPUnits
 	r.stats.LastRTPTs = rtpTs
 
-	if seq < r.stats.MaxSeq && (r.stats.MaxSeq-seq) > 0x8000 {
-		r.stats.Cycles += 1 << 16
+	if isNewerTimestamp(rtpTs, r.stats.MaxRTPTs) {
+		extMax := r.stats.Cycles + uint32(r.stats.MaxSeq)
+		cand := r.stats.Cycles + uint32(seq)
+		for cand < extMax {
+			r.stats.Cycles += 1 << 16
+			cand += 1 << 16
+		}
 		r.stats.MaxSeq = seq
-	} else if seq > r.stats.MaxSeq {
-		r.stats.MaxSeq = seq
+		r.stats.MaxRTPTs = rtpTs
 	}
 	r.stats.LastSeq = seq
 	r.stats.Received++
+}
+
+func isNewerTimestamp(a, b uint32) bool {
+	return int32(a-b) > 0
 }

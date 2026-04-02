@@ -35,10 +35,27 @@ type Receiver struct {
 }
 
 func Join(addr string, port int) (*Receiver, error) {
-	_ = addr
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port})
+	bindAddr := addr
+	if bindAddr == "" {
+		bindAddr = "0.0.0.0"
+	}
+	udpAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("%s:%d", bindAddr, port))
 	if err != nil {
 		return nil, err
+	}
+
+	conn, err := net.ListenUDP("udp4", udpAddr)
+	if err != nil {
+		if bindAddr != "0.0.0.0" {
+			conn2, err2 := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: port})
+			if err2 == nil {
+				conn = conn2
+			} else {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 	if err := conn.SetReadBuffer(1 << 20); err != nil {
 		_ = conn.Close()

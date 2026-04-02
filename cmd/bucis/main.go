@@ -103,26 +103,16 @@ func main() {
 	}
 	defer closeMedia()
 
-	go func() {
-		<-ctx.Done()
-		logger.Info("shutdown signal received, stopping")
-		_, _ = controlSender.Send([]byte("sound_stop"))
-		closeMedia()
-		closeControl()
-	}()
-
-	sendTicker := time.NewTicker(time.Duration(cfg.SendIntervalMs) * time.Millisecond)
-	defer sendTicker.Stop()
-
+shutdownLoop:
 	for {
 		if ctx.Err() != nil {
-			return
+			break shutdownLoop
 		}
 
 		tSend := time.Now().UnixMilli()
 		t0 := tSend + cfg.OffsetMs
 		sessionID := fmt.Sprintf("%08x", rand.Uint32())
-		msg := protocol.FormatSoundStart(t0, sessionID)
+		msg := protocol.FormatSoundStart(1, t0, sessionID)
 		if _, err := controlSender.Send([]byte(msg)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -139,10 +129,19 @@ func main() {
 		}
 		logger.Info("sound_stop sent")
 
+		wait := time.NewTimer(time.Duration(cfg.SendIntervalMs) * time.Millisecond)
 		select {
 		case <-ctx.Done():
-			return
-		case <-sendTicker.C:
+			if !wait.Stop() {
+				<-wait.C
+			}
+			break shutdownLoop
+		case <-wait.C:
 		}
+	}
+
+	logger.Info("shutdown: sending sound_stop")
+	if _, err := controlSender.Send([]byte("sound_stop")); err != nil {
+		logger.Warn("shutdown: sound_stop send failed", "err", err)
 	}
 }

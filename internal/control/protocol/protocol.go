@@ -7,6 +7,7 @@ import (
 )
 
 type SoundStart struct {
+	Type       int
 	T0        int64
 	SessionID string
 }
@@ -30,29 +31,38 @@ func Parse(b []byte) (start *SoundStart, stop *SoundStop, ok bool) {
 
 	switch cmd {
 	case "sound_start":
-		parts := make([]string, 0, 2)
+		parts := make([]string, 0, 3)
 		for _, part := range strings.Split(rest, ";") {
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue
 			}
 			parts = append(parts, part)
-			if len(parts) > 2 {
+			if len(parts) > 3 {
 				return nil, nil, false
 			}
 		}
-		if len(parts) < 1 {
+		if len(parts) != 2 && len(parts) != 3 {
 			return nil, nil, false
 		}
-		t0Str := parts[0]
+		typeStr := parts[0]
+		soundType, err := strconv.ParseInt(typeStr, 10, 64)
+		if err != nil {
+			return nil, nil, false
+		}
+		if soundType != 1 && soundType != 2 {
+			return nil, nil, false
+		}
+
+		t0Str := parts[1]
 		t0, err := strconv.ParseInt(t0Str, 10, 64)
 		if err != nil {
 			return nil, nil, false
 		}
 
 		sessionID := ""
-		if len(parts) == 2 {
-			sessionID = parts[1]
+		if len(parts) == 3 {
+			sessionID = parts[2]
 			if len(sessionID) != 8 {
 				return nil, nil, false
 			}
@@ -60,7 +70,7 @@ func Parse(b []byte) (start *SoundStart, stop *SoundStop, ok bool) {
 				return nil, nil, false
 			}
 		}
-		return &SoundStart{T0: t0, SessionID: sessionID}, nil, true
+		return &SoundStart{Type: int(soundType), T0: t0, SessionID: sessionID}, nil, true
 
 	case "sound_stop":
 		return nil, &SoundStop{Args: rest}, true
@@ -70,9 +80,8 @@ func Parse(b []byte) (start *SoundStart, stop *SoundStop, ok bool) {
 	}
 }
 
-func FormatSoundStart(t0 int64, sessionID string) string {
-	msg := "sound_start " +
-		strconv.FormatInt(t0, 10) + ";"
+func FormatSoundStart(soundType int, t0 int64, sessionID string) string {
+	msg := "sound_start " + strconv.Itoa(soundType) + ";" + strconv.FormatInt(t0, 10) + ";"
 	if sessionID != "" {
 		msg += sessionID + ";"
 	}
