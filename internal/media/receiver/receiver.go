@@ -111,11 +111,12 @@ func (r *Receiver) Stop() (SessionStats, error) {
 	doneCh := r.doneCh
 	r.mu.Unlock()
 
-	close(stopCh)
-
 	r.connMu.Lock()
 	c := r.conn
 	r.connMu.Unlock()
+
+	close(stopCh)
+
 	if c != nil {
 		_ = c.SetReadDeadline(time.Now())
 	}

@@ -51,7 +51,7 @@ func Join(addr string, port int) (*Receiver, error) {
 			if err2 == nil {
 				conn = conn2
 			} else {
-				return nil, err
+				return nil, fmt.Errorf("listen on %s: %w; fallback 0.0.0.0: %w", udpAddr, err, err2)
 			}
 		} else {
 			return nil, err
