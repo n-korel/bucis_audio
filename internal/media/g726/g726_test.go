@@ -81,16 +81,7 @@ func TestG726RoundTripSilence(t *testing.T) {
 	if len(got) != n {
 		t.Fatalf("len(got)=%d want %d", len(got), n)
 	}
-	var maxErr int
-	for i := range got {
-		e := int(got[i] - samples[i])
-		if e < 0 {
-			e = -e
-		}
-		if e > maxErr {
-			maxErr = e
-		}
-	}
+	maxErr := maxAbsDiff(samples, got)
 	if maxErr > 8 {
 		t.Fatalf("silence max abs err %d, want <= 8", maxErr)
 	}
@@ -119,9 +110,34 @@ func maxAbsDiff(a, b []int16) int {
 	return m
 }
 
+func maxAbsDiffFrom(a, b []int16, start int) int {
+	if start < 0 {
+		start = 0
+	}
+	if start > len(a) {
+		start = len(a)
+	}
+	if start > len(b) {
+		start = len(b)
+	}
+	var m int
+	for i := start; i < len(a) && i < len(b); i++ {
+		d := int(a[i] - b[i])
+		if d < 0 {
+			d = -d
+		}
+		if d > m {
+			m = d
+		}
+	}
+	return m
+}
+
 func TestG726RoundTripSines(t *testing.T) {
 	const n = 160 * 50
 	const sr = 8000.0
+	const warmupFrames = 6
+	const warmup = warmupFrames * 160
 	for _, hz := range []float64{300, 1000, 3200} {
 		hz := hz
 		t.Run(fmt.Sprintf("%gHz", hz), func(t *testing.T) {
@@ -130,9 +146,12 @@ func TestG726RoundTripSines(t *testing.T) {
 			var enc G726EncoderState
 			var dec G726DecoderState
 			out := G726DecodeFrame(G726EncodeFrame(in, &enc), &dec)
-			m := maxAbsDiff(in, out)
-			if m > 3500 {
-				t.Fatalf("freq=%v Hz max abs err %d, want <= 3500", hz, m)
+			if len(out) != n {
+				t.Fatalf("len(out)=%d want %d", len(out), n)
+			}
+			m := maxAbsDiffFrom(in, out, warmup)
+			if m > 1000 {
+				t.Fatalf("freq=%v Hz max abs err(after warmup=%d) %d, want <= 1000", hz, warmup, m)
 			}
 		})
 	}
@@ -159,5 +178,80 @@ func TestG726OddSampleCountSecondNibbleZero(t *testing.T) {
 		if got[i] != gotFull[i] {
 			t.Fatalf("sample %d: odd=%d full=%d", i, got[i], gotFull[i])
 		}
+	}
+}
+
+func TestG726DeterministicInitialState(t *testing.T) {
+	in := sineSamples(160*5, 1000, 8000)
+
+	var enc1 G726EncoderState
+	var enc2 G726EncoderState
+	p1 := G726EncodeFrame(in, &enc1)
+	p2 := G726EncodeFrame(in, &enc2)
+	if len(p1) != len(p2) {
+		t.Fatalf("len(p1)=%d len(p2)=%d", len(p1), len(p2))
+	}
+	for i := range p1 {
+		if p1[i] != p2[i] {
+			t.Fatalf("payload mismatch at byte %d: %d vs %d", i, p1[i], p2[i])
+		}
+	}
+
+	var dec1 G726DecoderState
+	var dec2 G726DecoderState
+	out1 := G726DecodeFrame(p1, &dec1)
+	out2 := G726DecodeFrame(p1, &dec2)
+	if len(out1) != len(out2) {
+		t.Fatalf("len(out1)=%d len(out2)=%d", len(out1), len(out2))
+	}
+	for i := range out1 {
+		if out1[i] != out2[i] {
+			t.Fatalf("decode mismatch at sample %d: %d vs %d", i, out1[i], out2[i])
+		}
+	}
+}
+
+func TestClipIntAndClipIntp2Boundaries(t *testing.T) {
+	if got := clipInt(10, -5, 5); got != 5 {
+		t.Fatalf("clipInt(10,-5,5)=%d want 5", got)
+	}
+	if got := clipInt(-10, -5, 5); got != -5 {
+		t.Fatalf("clipInt(-10,-5,5)=%d want -5", got)
+	}
+	if got := clipInt(3, -5, 5); got != 3 {
+		t.Fatalf("clipInt(3,-5,5)=%d want 3", got)
+	}
+
+	const p = 8
+	if got := clipIntp2(math.MaxInt32, p); got != (1<<p)-1 {
+		t.Fatalf("clipIntp2(MaxInt32,%d)=%d want %d", p, got, (1<<p)-1)
+	}
+	if got := clipIntp2(math.MinInt32, p); got != -1<<p {
+		t.Fatalf("clipIntp2(MinInt32,%d)=%d want %d", p, got, -1<<p)
+	}
+	if got := clipIntp2((1<<p)-1, p); got != (1<<p)-1 {
+		t.Fatalf("clipIntp2(%d,%d)=%d want %d", (1<<p)-1, p, got, (1<<p)-1)
+	}
+	if got := clipIntp2(-1<<p, p); got != -1<<p {
+		t.Fatalf("clipIntp2(%d,%d)=%d want %d", -1<<p, p, got, -1<<p)
+	}
+}
+
+func TestG726EncodeDecodeHandlesInt16Extremes(t *testing.T) {
+	in := []int16{
+		math.MinInt16,
+		math.MaxInt16,
+		math.MinInt16 + 1,
+		math.MaxInt16 - 1,
+		-1, 0, 1,
+	}
+	in = append(in, make([]int16, 160-len(in))...)
+
+	var enc G726EncoderState
+	var dec G726DecoderState
+	payload := G726EncodeFrame(in, &enc)
+	out := G726DecodeFrame(payload, &dec)
+	if len(out) != 160 {
+		t.Fatalf("len(out)=%d want 160", len(out))
 	}
 }

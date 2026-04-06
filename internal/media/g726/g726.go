@@ -29,6 +29,8 @@ type g726Core struct {
 	sez  int
 	y    int
 	code int
+
+	initialized bool
 }
 
 type G726EncoderState struct {
@@ -41,6 +43,7 @@ type G726DecoderState struct {
 
 func initCore(c *g726Core) {
 	c.code = 4
+	c.initialized = true
 	for i := range c.sr {
 		c.sr[i].mant = 1 << 5
 		c.pk[i] = 1
@@ -53,11 +56,14 @@ func initCore(c *g726Core) {
 	c.y = 544
 }
 
-func log2_16bit(v uint16) int {
-	if v == 0 {
+func log2_16bitSaturating(v int) int {
+	if v <= 0 {
 		return 0
 	}
-	return bits.Len16(v) - 1
+	if v > 0xffff {
+		v = 0xffff
+	}
+	return bits.Len16(uint16(v)) - 1
 }
 
 func i2f(i int, f *float11) {
@@ -68,7 +74,7 @@ func i2f(i int, f *float11) {
 		f.sign = 0
 	}
 	if i != 0 {
-		f.exp = uint8(log2_16bit(uint16(i)) + 1)
+		f.exp = uint8(log2_16bitSaturating(i) + 1)
 		f.mant = uint8((i << 6) >> f.exp)
 	} else {
 		f.exp = 0
@@ -144,7 +150,7 @@ func quantAdapt(c *g726Core, d int) int {
 		sign = 1
 		d = -d
 	}
-	exp := log2_16bit(uint16(d))
+	exp := log2_16bitSaturating(d)
 	dln := ((exp << 7) + (((d << 7) >> exp) & 0x7f)) - (c.y >> 2)
 	for quantTbl32[i] < math.MaxInt32 && int(quantTbl32[i]) < dln {
 		i++
@@ -281,7 +287,7 @@ func g726DecodeUpdate(c *g726Core, I int) int16 {
 }
 
 func EncodeLinear(sample int16, state *G726EncoderState) byte {
-	if state.st.code == 0 {
+	if !state.st.initialized {
 		initCore(&state.st)
 	}
 	d := int(sample)/4 - state.st.se
@@ -292,7 +298,7 @@ func EncodeLinear(sample int16, state *G726EncoderState) byte {
 }
 
 func DecodeLinear(code byte, state *G726DecoderState) int16 {
-	if state.st.code == 0 {
+	if !state.st.initialized {
 		initCore(&state.st)
 	}
 	return g726DecodeUpdate(&state.st, int(code&0x0f))
