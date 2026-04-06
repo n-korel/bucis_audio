@@ -20,6 +20,11 @@ type Brs struct {
 	ControlAddr string
 	ControlPort int
 	MediaPort   int
+
+	MetricsAddr       string
+	MetricsListenPort int
+	MetricsSendPort   int
+	MetricsReplyPort  int
 }
 
 func ParseBucis() (Bucis, error) {
@@ -86,10 +91,32 @@ func ParseBrs() (Brs, error) {
 		return Brs{}, err
 	}
 
+	metricsAddr := getEnvStringDefault("METRICS_ADDR", controlAddr)
+
+	metricsListenPort, err := getEnvIntDefault("METRICS_LISTEN_PORT", 8892)
+	if err != nil {
+		return Brs{}, err
+	}
+
+	metricsSendPort, err := getEnvIntDefault("METRICS_SEND_PORT", 8892)
+	if err != nil {
+		return Brs{}, err
+	}
+
+	metricsReplyPort, err := getEnvIntDefault("METRICS_REPLY_PORT", 8881)
+	if err != nil {
+		return Brs{}, err
+	}
+
 	return Brs{
 		ControlAddr: controlAddr,
 		ControlPort: controlPort,
 		MediaPort:   mediaPort,
+
+		MetricsAddr:       metricsAddr,
+		MetricsListenPort: metricsListenPort,
+		MetricsSendPort:   metricsSendPort,
+		MetricsReplyPort:  metricsReplyPort,
 	}, nil
 }
 

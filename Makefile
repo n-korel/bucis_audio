@@ -1,4 +1,4 @@
-.PHONY: build bucis brs brs-windows clean lint run-bucis run-brs
+.PHONY: build bucis brs brs-windows clean lint run-bucis run-bucis-mic run-brs
 
 build: bucis brs
 
@@ -16,6 +16,9 @@ brs-windows: ./bin
 
 run-bucis: bucis
 	set -a; [ -f .env ] && . ./.env; set +a; "./bin/bucis"
+
+run-bucis-mic: bucis
+	set -a; [ -f .env ] && . ./.env; set +a; "./bin/bucis" --sound-type 2
 
 run-brs: brs
 	set -a; [ -f .env ] && . ./.env; set +a; "./bin/brs"

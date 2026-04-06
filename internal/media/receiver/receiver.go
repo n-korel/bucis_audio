@@ -55,6 +55,7 @@ type Receiver struct {
 
 	mu      sync.Mutex
 	playing bool
+	mode    int
 	stopCh  chan struct{}
 	doneCh  chan struct{}
 	stats   SessionStats
@@ -64,6 +65,11 @@ type Receiver struct {
 	conn   *net.UDPConn
 }
 
+const (
+	modeRTP = iota + 1
+	modeSimMic
+)
+
 func New(mediaPort int) *Receiver {
 	return &Receiver{
 		mediaPort: mediaPort,
@@ -71,30 +77,57 @@ func New(mediaPort int) *Receiver {
 }
 
 func (r *Receiver) Start() error {
+	return r.StartBySoundType(1)
+}
+
+func (r *Receiver) StartBySoundType(soundType int) error {
 	r.mu.Lock()
 	if r.playing {
 		r.mu.Unlock()
 		return nil
 	}
-	laddr := &net.UDPAddr{IP: net.IPv4zero, Port: r.mediaPort}
-	conn, err := net.ListenUDP("udp4", laddr)
-	if err != nil {
+
+	switch soundType {
+	case 1:
+		laddr := &net.UDPAddr{IP: net.IPv4zero, Port: r.mediaPort}
+		conn, err := net.ListenUDP("udp4", laddr)
+		if err != nil {
+			r.mu.Unlock()
+			return err
+		}
+		r.connMu.Lock()
+		r.conn = conn
+		r.connMu.Unlock()
+		r.mode = modeRTP
+	case 2:
+		r.connMu.Lock()
+		r.conn = nil
+		r.connMu.Unlock()
+		r.mode = modeSimMic
+	default:
 		r.mu.Unlock()
-		return err
+		return nil
 	}
+
 	r.playing = true
 	r.runErr = nil
 	r.stopCh = make(chan struct{})
 	r.doneCh = make(chan struct{})
 	r.stats = SessionStats{}
-	r.connMu.Lock()
-	r.conn = conn
-	r.connMu.Unlock()
 	stopCh := r.stopCh
 	doneCh := r.doneCh
+	mode := r.mode
+	conn := r.conn
 	r.mu.Unlock()
 
-	go r.run(conn, stopCh, doneCh)
+	switch mode {
+	case modeRTP:
+		go r.runRTP(conn, stopCh, doneCh)
+	case modeSimMic:
+		go r.runSimMic(stopCh, doneCh)
+	default:
+		close(doneCh)
+	}
 	return nil
 }
 
@@ -126,6 +159,7 @@ func (r *Receiver) Stop() (SessionStats, error) {
 	err := r.runErr
 	r.runErr = nil
 	r.playing = false
+	r.mode = 0
 	r.stopCh = nil
 	r.doneCh = nil
 	r.mu.Unlock()
@@ -144,7 +178,7 @@ func (r *Receiver) LastPacketAt() time.Time {
 	return r.stats.LastPacket
 }
 
-func (r *Receiver) run(conn *net.UDPConn, stopCh <-chan struct{}, doneCh chan<- struct{}) {
+func (r *Receiver) runRTP(conn *net.UDPConn, stopCh <-chan struct{}, doneCh chan<- struct{}) {
 	defer func() {
 		r.mu.Lock()
 		r.playing = false
@@ -155,7 +189,9 @@ func (r *Receiver) run(conn *net.UDPConn, stopCh <-chan struct{}, doneCh chan<- 
 		r.connMu.Lock()
 		r.conn = nil
 		r.connMu.Unlock()
-		_ = conn.Close()
+		if conn != nil {
+			_ = conn.Close()
+		}
 	}()
 	_ = conn.SetReadBuffer(1 << 20)
 	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
@@ -193,6 +229,36 @@ func (r *Receiver) run(conn *net.UDPConn, stopCh <-chan struct{}, doneCh chan<- 
 
 		_ = g726.G726DecodeFrame(pkt.Payload, decState)
 		r.updateStats(pkt.SequenceNumber, pkt.Timestamp)
+	}
+}
+
+func (r *Receiver) runSimMic(stopCh <-chan struct{}, doneCh chan<- struct{}) {
+	defer func() {
+		r.mu.Lock()
+		r.playing = false
+		r.mu.Unlock()
+		close(doneCh)
+	}()
+
+	const (
+		frameDur = 20 * time.Millisecond
+		frameTs  = 160 // 20 ms @ 8 kHz
+	)
+	ticker := time.NewTicker(frameDur)
+	defer ticker.Stop()
+
+	var seq uint16
+	var ts uint32
+
+	for {
+		select {
+		case <-stopCh:
+			return
+		case <-ticker.C:
+			r.updateStats(seq, ts)
+			seq++
+			ts += frameTs
+		}
 	}
 }
 

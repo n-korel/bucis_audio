@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -26,6 +28,12 @@ type sessionState struct {
 	scheduledT0    int64
 	timer          *time.Timer
 	playbackActive bool
+}
+
+func (s *sessionState) Snapshot() (sessionID string, playbackActive bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionID, s.playbackActive
 }
 
 func (s *sessionState) CurrentID() string {
@@ -100,11 +108,21 @@ func main() {
 		controlAddr string
 		controlPort int
 		mediaPort   int
+
+		metricsAddr       string
+		metricsListenPort int
+		metricsSendPort   int
+		metricsReplyPort  int
 	)
 
 	flag.StringVar(&controlAddr, "control-addr", "", "UDP broadcast адрес (default из CONTROL_ADDR / автоопределение)")
 	flag.IntVar(&controlPort, "control-port", 0, "UDP порт (default из CONTROL_PORT)")
 	flag.IntVar(&mediaPort, "media-port", 0, "RTP media port (default из MEDIA_PORT)")
+
+	flag.StringVar(&metricsAddr, "metrics-addr", "", "UDP адрес метрик (default из METRICS_ADDR, fallback=control-addr)")
+	flag.IntVar(&metricsListenPort, "metrics-listen-port", 0, "UDP порт для приема get_metrics (default из METRICS_LISTEN_PORT)")
+	flag.IntVar(&metricsSendPort, "metrics-send-port", 0, "UDP порт назначения для отправки метрик (default из METRICS_SEND_PORT)")
+	flag.IntVar(&metricsReplyPort, "metrics-reply-port", 0, "UDP порт ответа на get_metrics (default из METRICS_REPLY_PORT)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -123,6 +141,14 @@ func main() {
 			cfg.ControlPort = controlPort
 		case "media-port":
 			cfg.MediaPort = mediaPort
+		case "metrics-addr":
+			cfg.MetricsAddr = metricsAddr
+		case "metrics-listen-port":
+			cfg.MetricsListenPort = metricsListenPort
+		case "metrics-send-port":
+			cfg.MetricsSendPort = metricsSendPort
+		case "metrics-reply-port":
+			cfg.MetricsReplyPort = metricsReplyPort
 		}
 	})
 
@@ -160,7 +186,56 @@ func main() {
 	var state sessionState
 	buf := make([]byte, 2048)
 
+	type lastSessionStats struct {
+		sessionID string
+		stats     receiver.SessionStats
+		at        time.Time
+	}
+	var lastMu sync.Mutex
+	var last lastSessionStats
+
+	metricsSend := func(payload string) {
+		if cfg.MetricsAddr == "" || cfg.MetricsSendPort == 0 {
+			return
+		}
+		raddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("%s:%d", cfg.MetricsAddr, cfg.MetricsSendPort))
+		if err != nil {
+			logger.Warn("metrics resolve failed", "err", err, "addr", cfg.MetricsAddr, "port", cfg.MetricsSendPort)
+			return
+		}
+		conn, err := net.DialUDP("udp4", nil, raddr)
+		if err != nil {
+			logger.Warn("metrics dial failed", "err", err, "addr", cfg.MetricsAddr, "port", cfg.MetricsSendPort)
+			return
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+		n, werr := conn.Write([]byte(payload))
+		_ = conn.Close()
+		if werr != nil {
+			logger.Warn("metrics send failed", "err", werr, "addr", cfg.MetricsAddr, "port", cfg.MetricsSendPort)
+			return
+		}
+		logger.Debug("metrics sent", "addr", cfg.MetricsAddr, "port", cfg.MetricsSendPort, "bytes", n)
+	}
+
+	formatRTPMetrics := func(node, sessionID string, stats receiver.SessionStats) string {
+		jitter := math.Round(stats.JitterMs()*100) / 100
+		return fmt.Sprintf(
+			"metrics rtp;%s;%s;%d;%d;%d;%.2f;;;;",
+			node,
+			sessionID,
+			stats.Received,
+			stats.Expected(),
+			stats.Lost(),
+			jitter,
+		)
+	}
+
 	logSessionStats := func(sessionID string, stats receiver.SessionStats) {
+		lastMu.Lock()
+		last = lastSessionStats{sessionID: sessionID, stats: stats, at: time.Now()}
+		lastMu.Unlock()
+
 		logger.Info("session stats",
 			"session_id", sessionID,
 			"received", stats.Received,
@@ -168,6 +243,8 @@ func main() {
 			"lost", stats.Lost(),
 			"jitter_ms", math.Round(stats.JitterMs()*100)/100,
 		)
+
+		metricsSend(formatRTPMetrics(brsName, sessionID, stats))
 	}
 
 	const rtpIdleTimeout = 1 * time.Second
@@ -178,8 +255,72 @@ func main() {
 	}()
 
 	go func() {
+		if cfg.MetricsListenPort == 0 {
+			return
+		}
+		laddr := &net.UDPAddr{IP: net.IPv4zero, Port: cfg.MetricsListenPort}
+		conn, err := net.ListenUDP("udp4", laddr)
+		if err != nil {
+			logger.Warn("metrics listener failed", "err", err, "port", cfg.MetricsListenPort)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		buf := make([]byte, 2048)
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			n, raddr, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						continue
+					}
+				}
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				logger.Warn("metrics read failed", "err", err)
+				continue
+			}
+
+			msg := strings.TrimSpace(string(buf[:n]))
+			if msg != "get_metrics" {
+				continue
+			}
+			logger.Debug("get_metrics received", "from_ip", raddr.IP.String(), "from_port", raddr.Port)
+
+			lastMu.Lock()
+			snap := last
+			lastMu.Unlock()
+
+			payload := "metrics rtp;" + brsName + ";;0;0;0;0.00;;;;"
+			if snap.sessionID != "" {
+				payload = formatRTPMetrics(brsName, snap.sessionID, snap.stats)
+			}
+
+			if cfg.MetricsReplyPort == 0 {
+				continue
+			}
+			dst := &net.UDPAddr{IP: raddr.IP, Port: cfg.MetricsReplyPort}
+			wrote, _ := conn.WriteToUDP([]byte(payload), dst)
+			logger.Debug("metrics reply sent", "to_ip", dst.IP.String(), "to_port", dst.Port, "bytes", wrote)
+		}
+	}()
+
+	go func() {
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
+
+		type idleCandidate struct {
+			sessionID string
+			lastPktAt time.Time
+		}
+		var cand *idleCandidate
 
 		for {
 			select {
@@ -188,50 +329,68 @@ func main() {
 			case <-ticker.C:
 			}
 
-			if !mediaRecv.IsPlaying() && state.PlaybackActive() {
-				prevID, _ := state.Stop()
+			sessionID, playbackActive := state.Snapshot()
+			isPlaying := mediaRecv.IsPlaying()
+			lastPktAt := mediaRecv.LastPacketAt()
+
+			if playbackActive && !isPlaying {
+				if sessionID == "" {
+					cand = nil
+					continue
+				}
+				prevID, _, ok := state.StopIfSession(sessionID)
+				if !ok {
+					cand = nil
+					continue
+				}
 				stats, recvErr := stopPlayback()
 				if recvErr != nil {
 					logger.Warn("media receiver stopped with error", "err", recvErr, "session_id", prevID)
 				}
-				if prevID != "" {
-					logSessionStats(prevID, stats)
-					logger.Warn("session ended (media receiver stopped)", "session_id", prevID)
-				}
+				logSessionStats(prevID, stats)
+				logger.Warn("session ended (media receiver stopped)", "session_id", prevID)
+				cand = nil
 				continue
 			}
 
-			if !mediaRecv.IsPlaying() {
+			if !isPlaying {
+				cand = nil
 				continue
 			}
 
-			last := mediaRecv.LastPacketAt()
-			if last.IsZero() {
-				continue
-			}
-			if time.Since(last) <= rtpIdleTimeout {
+			if !playbackActive || sessionID == "" {
+				cand = nil
 				continue
 			}
 
-			sessionIDSnapshot := state.CurrentID()
-			if sessionIDSnapshot == "" {
-				continue
-			}
-			if time.Since(mediaRecv.LastPacketAt()) <= rtpIdleTimeout {
+			if lastPktAt.IsZero() || time.Since(lastPktAt) <= rtpIdleTimeout {
+				cand = nil
 				continue
 			}
 
-			prevID, _, ok := state.StopIfSession(sessionIDSnapshot)
+			if cand == nil || cand.sessionID != sessionID {
+				cand = &idleCandidate{sessionID: sessionID, lastPktAt: lastPktAt}
+				continue
+			}
+
+			if lastPktAt.After(cand.lastPktAt) {
+				cand = &idleCandidate{sessionID: sessionID, lastPktAt: lastPktAt}
+				continue
+			}
+
+			prevID, _, ok := state.StopIfSession(sessionID)
 			if !ok {
+				cand = nil
 				continue
 			}
-			sessionID := prevID
+			sessionID = prevID
 			stats, recvErr := stopPlayback()
 			if recvErr != nil {
 				logger.Warn("media receiver error on stop", "err", recvErr, "session_id", sessionID)
 			}
-			logger.Warn("session timeout (no RTP)", "session_id", sessionID, "idle_ms", time.Since(last).Milliseconds())
+			logger.Warn("session timeout (no RTP)", "session_id", sessionID, "idle_ms", time.Since(lastPktAt).Milliseconds())
 			logSessionStats(sessionID, stats)
+			cand = nil
 		}
 	}()
 
@@ -316,17 +475,33 @@ func main() {
 		}
 
 		sessionID := start.SessionID
-		logger.Info("sound_start received", "session_id", start.SessionID)
+		logger.Info("sound_start received", "session_id", start.SessionID, "type", start.Type)
 		logger.Debug(
 			"scheduled playback start",
 			"session_id", sessionID,
 		)
 		state.ScheduleStart(s, sessionID, t0, func() {
-			if err := mediaRecv.Start(); err != nil {
+			state.mu.Lock()
+			if state.sessionID != sessionID {
+				state.mu.Unlock()
+				return
+			}
+			mediaStopMu.Lock()
+			if state.sessionID != sessionID {
+				mediaStopMu.Unlock()
+				state.mu.Unlock()
+				return
+			}
+			state.playbackActive = true
+			state.mu.Unlock()
+
+			err := mediaRecv.StartBySoundType(start.Type)
+			mediaStopMu.Unlock()
+			if err != nil {
+				_, _, _ = state.StopIfSession(sessionID)
 				logger.Error("media receiver start failed", "err", err, "session_id", sessionID)
 				return
 			}
-			state.MarkPlaybackStarted()
 			startDelta := time.Now().UnixMilli() - t0
 			logger.Info("playback started", "session_id", sessionID, "start_delta_ms", startDelta)
 		})

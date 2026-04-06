@@ -7,7 +7,7 @@
 Проект моделирует **синхронный старт воспроизведения** на нескольких узлах в одной подсети через **UDP broadcast** с разделением на:
 
 - **control-plane**: управляющие UDP-команды `sound_start` / `sound_stop`
-- **media-plane**: RTP/UDP поток с аудио (IMA ADPCM, нестандартный)
+- **media-plane**: RTP/UDP поток с аудио (G.726 32 kbit/s)
 
 ---
 
@@ -15,15 +15,15 @@
 
 ### Принцип разделения
 
-- **BUCIS** — инициатор. Читает `audio/dcwarning.mp3`, декодирует его в PCM (Pulse-code modulation), кодирует в IMA ADPCM и рассылает RTP-пакеты. Перед стартом RTP отправляет `sound_start` по broadcast с таймстампом \(t0\) — чтобы получатели синхронно начали приём в заданный момент.
-- **BRS** — получатель. По команде `sound_start` планирует старт медиаприёмника на момент \(t0\). Ровно в \(t0\) открывает UDP-сокет для media-plane и принимает RTP-пакеты, декодирует IMA ADPCM в PCM (PCM отбрасывается — ALSA недоступен), собирает метрики: число принятых пакетов, потери, jitter.
+- **BUCIS** — инициатор. Читает MP3, декодирует его в PCM (Pulse-code modulation), кодирует в G.726 и рассылает RTP-пакеты. Перед стартом RTP отправляет `sound_start` по broadcast с таймстампом \(t0\) — чтобы получатели синхронно начали приём в заданный момент.
+- **BRS** — получатель. По команде `sound_start` планирует старт медиаприёмника на момент \(t0\). Ровно в \(t0\) открывает UDP-сокет для media-plane и принимает RTP-пакеты, декодирует G.726 в PCM (PCM отбрасывается — ALSA недоступен), собирает метрики: число принятых пакетов, потери, jitter.
 
 ### Два канала
 
 | Канал         | Порт | Протокол                          | Направление | Содержание                  |
 | ------------- | ---- | --------------------------------- | ----------- | --------------------------- |
 | Control-plane | 8889 | UDP broadcast                     | BUCIS → BRS | `sound_start`, `sound_stop` |
-| Media-plane   | 5006 | RTP/UDP broadcast `192.168.1.255` | BUCIS → BRS | IMA ADPCM 32 kbit/s         |
+| Media-plane   | 5006 | RTP/UDP broadcast `192.168.1.255` | BUCIS → BRS | G.726 32 kbit/s             |
 
 ### Топология
 
@@ -44,20 +44,18 @@ graph TB
 
 
     BUCIS -->|"broadcast 192.168.1.255:5006
-    RTP IMA ADPCM"| BRS1
+    RTP G.726"| BRS1
 
 ```
-
-Оба канала используют один broadcast-адрес (например `192.168.1.255`). Для control-plane `brs` слушает `0.0.0.0:CONTROL_PORT` (Windows не позволяет bind'иться на broadcast-адрес), поэтому входящие broadcast-команды будут приниматься независимо от того, какой `CONTROL_ADDR` задан. Для media-plane `brs` слушает `0.0.0.0:MEDIA_PORT` только во время активной сессии (после наступления \(t0\)).
 
 ---
 
 ## 2. Роли узлов
 
 - **`bucis`** (инициатор)
-  - читает MP3 (`audio/dcwarning.mp3` по умолчанию)
+  - читает MP3 (путь задаётся через `AUDIO_FILE` / `--audio-file`)
   - декодирует в PCM, ресемплит в 8 kHz mono
-  - кодирует PCM в **IMA ADPCM (ADPCM 4-bit)**
+  - кодирует PCM в **G.726** 32 kbit/s
   - отправляет `sound_start` с таймстампом \(t0 = now + offset\) по broadcast (1 раз на сессию)
   - ровно в \(t0\) начинает слать **RTP** (20 мс фреймы) по broadcast на media-порт
   - по завершении отправляет `sound_stop`
@@ -65,7 +63,7 @@ graph TB
 - **`brs`** (получатель)
   - слушает broadcast control-plane
   - по `sound_start` планирует старт приёма на момент \(t0\)
-  - принимает RTP, декодирует IMA ADPCM → PCM (PCM отбрасывается)
+  - принимает RTP, декодирует G.726 → PCM (PCM отбрасывается)
   - собирает статистику сессии: `received / expected / lost / jitter_ms`
   - по `sound_stop` останавливает приём и печатает итоговые метрики
   - если RTP не приходит \(\approx 1\) секунду во время активной сессии — сессия автоматически завершается по таймауту и печатаются метрики
@@ -157,25 +155,7 @@ sequenceDiagram
 Для `brs`:
 
 - **`BRS_NAME`**: имя узла в логах, default `brs`
-
-### CLI-флаги
-
-Флаги имеют приоритет над переменными окружения.
-
-`bucis`:
-
-```
---control-addr   broadcast-адрес
---control-port   UDP порт control-plane
---media-port     UDP порт media-plane
---offset-ms      задержка до t0
---audio-file     путь к MP3
-```
-
-`brs`:
-
-```
---control-addr   broadcast-адрес
---control-port   UDP порт control-plane
---media-port     UDP порт media-plane
-```
+- **`METRICS_ADDR`**: адрес назначения метрик, default = `CONTROL_ADDR`
+- **`METRICS_LISTEN_PORT`**: UDP порт для приёма команды `get_metrics`, default `8892`
+- **`METRICS_SEND_PORT`**: UDP порт назначения для отправки метрик, default `8892`
+- **`METRICS_REPLY_PORT`**: UDP порт ответа на `get_metrics`, default `8881`

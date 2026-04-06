@@ -27,12 +27,14 @@ func main() {
 	var mediaPortVal int
 	var offsetMsVal int64
 	var audioFileVal string
+	var soundTypeVal int
 
 	flag.StringVar(&controlAddrVal, "control-addr", "", "UDP broadcast address (default from CONTROL_ADDR / auto-detect)")
 	flag.IntVar(&controlPortVal, "control-port", 0, "UDP port (default from CONTROL_PORT)")
 	flag.IntVar(&mediaPortVal, "media-port", 0, "RTP media port (default from MEDIA_PORT)")
 	flag.Int64Var(&offsetMsVal, "offset-ms", 0, "offset for t0 in milliseconds (default from CONTROL_OFFSET_MS / OFFSET_MS)")
 	flag.StringVar(&audioFileVal, "audio-file", "", "path to mp3 audio file (default from AUDIO_FILE)")
+	flag.IntVar(&soundTypeVal, "sound-type", 1, "sound_start type: 1=file, 2=mic (default 1)")
 	flag.Parse()
 	log.Init(os.Getenv("LOG_FORMAT"))
 	logger := log.With("role", "bucis")
@@ -63,6 +65,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "CONTROL_OFFSET_MS/--offset-ms must be > 0")
 		os.Exit(1)
 	}
+	if soundTypeVal != 1 && soundTypeVal != 2 {
+		fmt.Fprintln(os.Stderr, "--sound-type must be 1 or 2")
+		os.Exit(1)
+	}
 
 	controlSender, err := udp.NewSender(cfg.ControlAddr, cfg.ControlPort)
 	if err != nil {
@@ -89,6 +95,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to decode audio file %q: %v\n", cfg.AudioFile, err)
 		os.Exit(1)
 	}
+	pcmDur := time.Duration(int64(len(pcm))*1000/8000) * time.Millisecond
+	if pcmDur <= 0 {
+		pcmDur = 1 * time.Second
+	}
 
 	mediaSender, err := sender.New(cfg.ControlAddr, cfg.MediaPort)
 	if err != nil {
@@ -114,17 +124,33 @@ shutdownLoop:
 		tSend := time.Now().UnixMilli()
 		t0 := tSend + cfg.OffsetMs
 		sessionID := fmt.Sprintf("%08x", rand.Uint32())
-		msg := protocol.FormatSoundStart(1, t0, sessionID)
+		msg := protocol.FormatSoundStart(soundTypeVal, t0, sessionID)
 		if _, err := controlSender.Send([]byte(msg)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		logger.Info("sound_start sent", "session_id", sessionID)
+		logger.Info("sound_start sent", "session_id", sessionID, "type", soundTypeVal)
 
-		if err := mediaSender.StreamAt(ctx, t0, pcm); err != nil &&
-			!errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
-			fmt.Fprintf(os.Stderr, "media stream error: %v\n", err)
-			os.Exit(1)
+		if soundTypeVal == 1 {
+			if err := mediaSender.StreamAt(ctx, t0, pcm); err != nil &&
+				!errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+				fmt.Fprintf(os.Stderr, "media stream error: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			untilT0 := time.Until(time.UnixMilli(t0))
+			if untilT0 < 0 {
+				untilT0 = 0
+			}
+			wait := time.NewTimer(untilT0 + pcmDur)
+			select {
+			case <-ctx.Done():
+				if !wait.Stop() {
+					<-wait.C
+				}
+				break shutdownLoop
+			case <-wait.C:
+			}
 		}
 		if _, err := controlSender.Send([]byte("sound_stop")); err != nil {
 			fmt.Fprintln(os.Stderr, err)
