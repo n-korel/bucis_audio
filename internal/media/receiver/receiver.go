@@ -5,15 +5,15 @@ import (
 	"sync"
 	"time"
 
-	imaadpcm "announcer_simulator/internal/media/g726"
+	"announcer_simulator/internal/media/g726"
 	mediarpt "announcer_simulator/internal/media/rtp"
 
 	pionrtp "github.com/pion/rtp"
 )
 
 const (
-	readTimeout = 200 * time.Millisecond
-	rtpTickNs   = int64(125000)
+	readTimeout       = 200 * time.Millisecond
+	rtpTickNs         = int64(125000)
 	maxWrapForwardGap = 10000
 )
 
@@ -161,7 +161,7 @@ func (r *Receiver) run(conn *net.UDPConn, stopCh <-chan struct{}, doneCh chan<- 
 	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
 
 	buf := make([]byte, 2048)
-	decState := &imaadpcm.IMAADPCMDecoderState{}
+	decState := &g726.G726DecoderState{}
 
 	for {
 		select {
@@ -187,11 +187,11 @@ func (r *Receiver) run(conn *net.UDPConn, stopCh <-chan struct{}, doneCh chan<- 
 		if err := pkt.Unmarshal(buf[:n]); err != nil {
 			continue
 		}
-		if pkt.PayloadType != mediarpt.PayloadTypeIMAADPCM() {
+		if pkt.PayloadType != mediarpt.PayloadTypeG726() {
 			continue
 		}
 
-		_ = imaadpcm.IMAADPCMDecodeFrame(pkt.Payload, decState)
+		_ = g726.G726DecodeFrame(pkt.Payload, decState)
 		r.updateStats(pkt.SequenceNumber, pkt.Timestamp)
 	}
 }

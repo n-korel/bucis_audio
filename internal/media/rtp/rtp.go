@@ -12,23 +12,23 @@ import (
 )
 
 const (
-	CodecNameIMAADPCM          = "IMA_ADPCM"
-	DefaultPayloadTypeIMAADPCM = uint8(96) // dynamic RTP payload type range
-	SampleRate                 = 8000
-	SamplesPerFrame            = 160
-	FrameDuration              = 20 * time.Millisecond
+	CodecNameG726          = "G726"
+	DefaultPayloadTypeG726 = uint8(2) // RFC 3551 static PT for G.726 32 kbit/s @ 8 kHz
+	SampleRate             = 8000
+	SamplesPerFrame        = 160
+	FrameDuration          = 20 * time.Millisecond
 )
 
-const envPayloadTypeIMAADPCMKey = "RTP_IMAADPCM_PT"
+const envPayloadTypeG726Key = "RTP_G726_PT"
 
 var (
-	payloadTypeOnce        sync.Once
-	payloadTypeIMAADPCMVal uint8 = DefaultPayloadTypeIMAADPCM
+	payloadTypeOnce    sync.Once
+	payloadTypeG726Val uint8 = DefaultPayloadTypeG726
 )
 
-func PayloadTypeIMAADPCM() uint8 {
+func PayloadTypeG726() uint8 {
 	payloadTypeOnce.Do(func() {
-		raw := os.Getenv(envPayloadTypeIMAADPCMKey)
+		raw := os.Getenv(envPayloadTypeG726Key)
 		if raw == "" {
 			return
 		}
@@ -36,19 +36,19 @@ func PayloadTypeIMAADPCM() uint8 {
 		if err != nil {
 			return
 		}
-		if n < int(DefaultPayloadTypeIMAADPCM) || n > 127 {
+		if n != 2 && (n < 96 || n > 127) {
 			return
 		}
-		payloadTypeIMAADPCMVal = uint8(n)
+		payloadTypeG726Val = uint8(n)
 	})
-	return payloadTypeIMAADPCMVal
+	return payloadTypeG726Val
 }
 
 func NewPacket(seq uint16, ts uint32, ssrc uint32, payload []byte) *pionrtp.Packet {
 	return &pionrtp.Packet{
 		Header: pionrtp.Header{
 			Version:        2,
-			PayloadType:    PayloadTypeIMAADPCM(),
+			PayloadType:    PayloadTypeG726(),
 			SequenceNumber: seq,
 			Timestamp:      ts,
 			SSRC:           ssrc,

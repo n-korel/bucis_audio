@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	imaadpcm "announcer_simulator/internal/media/g726"
+	"announcer_simulator/internal/media/g726"
 	mediarpt "announcer_simulator/internal/media/rtp"
 )
 
@@ -51,7 +51,7 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 		}
 	}
 
-	encState := &imaadpcm.IMAADPCMEncoderState{}
+	encState := &g726.G726EncoderState{}
 	seq := mediarpt.RandomSequence()
 	ssrc := mediarpt.RandomSSRC()
 	rtpTS := uint32(0)
@@ -84,7 +84,7 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 			copy(frame, pcm[i:])
 		}
 
-		payload := imaadpcm.IMAADPCMEncodeFrame(frame, encState)
+		payload := g726.G726EncodeFrame(frame, encState)
 		pkt := mediarpt.NewPacket(seq, rtpTS, ssrc, payload)
 		raw, err := pkt.Marshal()
 		if err != nil {
