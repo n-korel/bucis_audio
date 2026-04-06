@@ -147,7 +147,12 @@ func (r *Receiver) LastPacketAt() time.Time {
 }
 
 func (r *Receiver) run(conn *net.UDPConn, stopCh <-chan struct{}, doneCh chan<- struct{}) {
-	defer close(doneCh)
+	defer func() {
+		r.mu.Lock()
+		r.playing = false
+		r.mu.Unlock()
+		close(doneCh)
+	}()
 	defer func() {
 		r.connMu.Lock()
 		r.conn = nil
@@ -215,13 +220,13 @@ func (r *Receiver) updateStats(seq uint16, rtpTs uint32) {
 		return
 	}
 
-	transitPrev := float64(r.stats.LastArrival - int64(r.stats.LastRTPTs))
-	transitNow := float64(nowRTPUnits - int64(rtpTs))
-	d := transitNow - transitPrev
+	arrivalDelta := nowRTPUnits - r.stats.LastArrival
+	tsDelta := int64(int32(rtpTs - r.stats.LastRTPTs))
+	d := arrivalDelta - tsDelta
 	if d < 0 {
 		d = -d
 	}
-	r.stats.Jitter += (d - r.stats.Jitter) / 16.0
+	r.stats.Jitter += (float64(d) - r.stats.Jitter) / 16.0
 	r.stats.LastArrival = nowRTPUnits
 	r.stats.LastRTPTs = rtpTs
 

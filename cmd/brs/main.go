@@ -22,9 +22,10 @@ import (
 type sessionState struct {
 	mu sync.Mutex
 
-	sessionID   string
-	scheduledT0 int64
-	timer       *time.Timer
+	sessionID      string
+	scheduledT0    int64
+	timer          *time.Timer
+	playbackActive bool
 }
 
 func (s *sessionState) CurrentID() string {
@@ -38,11 +39,24 @@ func (s *sessionState) clearSessionLocked() (prevID string, prevT0 int64) {
 	prevT0 = s.scheduledT0
 	s.sessionID = ""
 	s.scheduledT0 = 0
+	s.playbackActive = false
 	if s.timer != nil {
 		s.timer.Stop()
 		s.timer = nil
 	}
 	return prevID, prevT0
+}
+
+func (s *sessionState) MarkPlaybackStarted() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.playbackActive = true
+}
+
+func (s *sessionState) PlaybackActive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.playbackActive
 }
 
 func (s *sessionState) Stop() (prevID string, prevT0 int64) {
@@ -137,18 +151,24 @@ func main() {
 	mediaRecv := receiver.New(cfg.MediaPort)
 
 	var mediaStopMu sync.Mutex
-	stopPlayback := func() (stats receiver.SessionStats, err error, stopped bool) {
+	stopPlayback := func() (stats receiver.SessionStats, err error) {
 		mediaStopMu.Lock()
 		defer mediaStopMu.Unlock()
-		if !mediaRecv.IsPlaying() {
-			return receiver.SessionStats{}, nil, false
-		}
-		stats, err = mediaRecv.Stop()
-		return stats, err, true
+		return mediaRecv.Stop()
 	}
 
 	var state sessionState
 	buf := make([]byte, 2048)
+
+	logSessionStats := func(sessionID string, stats receiver.SessionStats) {
+		logger.Info("session stats",
+			"session_id", sessionID,
+			"received", stats.Received,
+			"expected", stats.Expected(),
+			"lost", stats.Lost(),
+			"jitter_ms", math.Round(stats.JitterMs()*100)/100,
+		)
+	}
 
 	const rtpIdleTimeout = 1 * time.Second
 
@@ -166,6 +186,19 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+			}
+
+			if !mediaRecv.IsPlaying() && state.PlaybackActive() {
+				prevID, _ := state.Stop()
+				stats, recvErr := stopPlayback()
+				if recvErr != nil {
+					logger.Warn("media receiver stopped with error", "err", recvErr, "session_id", prevID)
+				}
+				if prevID != "" {
+					logSessionStats(prevID, stats)
+					logger.Warn("session ended (media receiver stopped)", "session_id", prevID)
+				}
+				continue
 			}
 
 			if !mediaRecv.IsPlaying() {
@@ -193,34 +226,14 @@ func main() {
 				continue
 			}
 			sessionID := prevID
-			stats, recvErr, stopped := stopPlayback()
-			if !stopped {
-				logger.Warn("session timeout (no RTP), playback already stopped", "session_id", sessionID, "idle_ms", time.Since(last).Milliseconds())
-				continue
-			}
+			stats, recvErr := stopPlayback()
 			if recvErr != nil {
 				logger.Warn("media receiver error on stop", "err", recvErr, "session_id", sessionID)
 			}
 			logger.Warn("session timeout (no RTP)", "session_id", sessionID, "idle_ms", time.Since(last).Milliseconds())
-			logger.Info("session stats",
-				"session_id", sessionID,
-				"received", stats.Received,
-				"expected", stats.Expected(),
-				"lost", stats.Lost(),
-				"jitter_ms", math.Round(stats.JitterMs()*100)/100,
-			)
+			logSessionStats(sessionID, stats)
 		}
 	}()
-
-	logSessionStats := func(sessionID string, stats receiver.SessionStats) {
-		logger.Info("session stats",
-			"session_id", sessionID,
-			"received", stats.Received,
-			"expected", stats.Expected(),
-			"lost", stats.Lost(),
-			"jitter_ms", math.Round(stats.JitterMs()*100)/100,
-		)
-	}
 
 	for {
 		n, _, err := recv.Read(buf)
@@ -228,8 +241,8 @@ func main() {
 			select {
 			case <-ctx.Done():
 				prevID, _ := state.Stop()
-				stats, recvErr, stopped := stopPlayback()
-				if stopped {
+				stats, recvErr := stopPlayback()
+				if prevID != "" {
 					logger.Info("playback stopping (shutdown)")
 					if recvErr != nil {
 						logger.Warn("media receiver error on stop", "err", recvErr, "session_id", prevID)
@@ -262,8 +275,8 @@ func main() {
 			}
 
 			prevID, prevT0 := state.Stop()
-			stats, recvErr, stopped := stopPlayback()
-			if stopped {
+			stats, recvErr := stopPlayback()
+			if prevID != "" {
 				if recvErr != nil {
 					logger.Warn("media receiver error on stop", "err", recvErr, "session_id", prevID)
 				}
@@ -292,8 +305,8 @@ func main() {
 		}
 
 		oldSessionID, _ := state.Stop()
-		stats, recvErr, stopped := stopPlayback()
-		if stopped {
+		stats, recvErr := stopPlayback()
+		if oldSessionID != "" {
 			logger.Warn("session replaced", "old_session_id", oldSessionID, "new_session_id", start.SessionID)
 			if recvErr != nil {
 				logger.Warn("media receiver error on stop", "err", recvErr, "session_id", oldSessionID)
@@ -313,6 +326,7 @@ func main() {
 				logger.Error("media receiver start failed", "err", err, "session_id", sessionID)
 				return
 			}
+			state.MarkPlaybackStarted()
 			startDelta := time.Now().UnixMilli() - t0
 			logger.Info("playback started", "session_id", sessionID, "start_delta_ms", startDelta)
 		})
