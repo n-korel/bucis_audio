@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -119,7 +121,8 @@ shutdownLoop:
 		}
 		logger.Info("sound_start sent", "session_id", sessionID)
 
-		if err := mediaSender.StreamAt(ctx, t0, pcm); err != nil && err != context.Canceled {
+		if err := mediaSender.StreamAt(ctx, t0, pcm); err != nil &&
+			!errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
 			fmt.Fprintf(os.Stderr, "media stream error: %v\n", err)
 			os.Exit(1)
 		}

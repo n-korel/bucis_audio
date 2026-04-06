@@ -2,8 +2,10 @@ package sender
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
 	imaadpcm "announcer_simulator/internal/media/g726"
@@ -11,8 +13,9 @@ import (
 )
 
 type Sender struct {
-	conn *net.UDPConn
-	addr *net.UDPAddr
+	conn   *net.UDPConn
+	addr   *net.UDPAddr
+	closed atomic.Bool
 }
 
 func New(broadcastAddr string, mediaPort int) (*Sender, error) {
@@ -28,6 +31,7 @@ func New(broadcastAddr string, mediaPort int) (*Sender, error) {
 }
 
 func (s *Sender) Close() error {
+	s.closed.Store(true)
 	return s.conn.Close()
 }
 
@@ -86,7 +90,19 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 		if err != nil {
 			return err
 		}
+		if s.closed.Load() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return net.ErrClosed
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, err := s.conn.Write(raw); err != nil {
+			if ctx.Err() != nil && errors.Is(err, net.ErrClosed) {
+				return ctx.Err()
+			}
 			return err
 		}
 

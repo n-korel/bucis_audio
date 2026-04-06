@@ -100,7 +100,7 @@ func (r *Receiver) Start() error {
 
 func (r *Receiver) Stop() (SessionStats, error) {
 	r.mu.Lock()
-	if !r.playing {
+	if r.doneCh == nil {
 		stats := r.stats
 		err := r.runErr
 		r.runErr = nil
@@ -112,14 +112,12 @@ func (r *Receiver) Stop() (SessionStats, error) {
 	r.mu.Unlock()
 
 	r.connMu.Lock()
-	c := r.conn
+	if c := r.conn; c != nil {
+		_ = c.SetReadDeadline(time.Now())
+	}
 	r.connMu.Unlock()
 
 	close(stopCh)
-
-	if c != nil {
-		_ = c.SetReadDeadline(time.Now())
-	}
 
 	<-doneCh
 
