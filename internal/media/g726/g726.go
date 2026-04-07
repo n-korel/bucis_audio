@@ -5,6 +5,33 @@ import (
 	"math/bits"
 )
 
+const (
+	// ITU-T G.726, Annex A: internal fixed-point conventions used by the algorithm blocks.
+	//
+	// LOG/ANTILOG domain uses 7 fractional bits (values masked by 0x7f) and (exp<<7)+mant packing.
+	g726LogFracBits = 7
+	g726LogFracMask = (1 << g726LogFracBits) - 1 // 0x7f
+
+	// ITU-T G.726, Annex A, block FMULT: rounding constant before >>4 in mantissa multiply.
+	g726FmultRounding = 0x30
+	g726FmultMantShift = 4
+
+	// ITU-T G.726, Annex A, block FMULT: exponent alignment constant for this float11 format.
+	// Matches the reference algorithm’s exponent handling for (4-bit exp, 6-bit mantissa) multiply.
+	g726FmultExpBias = 19
+
+	// ITU-T G.726, Annex A, block LIMB: limits for non-steady state step size multiplier yu.
+	g726YuMin = 544
+	g726YuMax = 5120
+
+	// ITU-T G.726, Annex A, blocks LIMC/LIMD: predictor coefficient limits (32 kbit/s mode).
+	g726A2Limit = 12288
+	g726A1LimitBase = 15360
+
+	// ITU-T G.726, Annex A, block TONE: a2 threshold for tone/modem (data) detection.
+	g726ToneA2Threshold = -11776
+)
+
 type float11 struct {
 	sign uint8
 	exp  uint8
@@ -51,9 +78,9 @@ func initCore(c *g726Core) {
 	for i := range c.dq {
 		c.dq[i].mant = 1 << 5
 	}
-	c.yu = 544
+	c.yu = g726YuMin
 	c.yl = 34816
-	c.y = 544
+	c.y = g726YuMin
 }
 
 func log2_16bitSaturating(v int) int {
@@ -84,11 +111,11 @@ func i2f(i int, f *float11) {
 
 func mult(f1, f2 *float11) int {
 	exp := int(f1.exp + f2.exp)
-	res := (int(f1.mant)*int(f2.mant) + 0x30) >> 4
-	if exp > 19 {
-		res <<= exp - 19
+	res := (int(f1.mant)*int(f2.mant) + g726FmultRounding) >> g726FmultMantShift
+	if exp > g726FmultExpBias {
+		res <<= exp - g726FmultExpBias
 	} else {
-		res >>= 19 - exp
+		res >>= g726FmultExpBias - exp
 	}
 	if (f1.sign ^ f2.sign) != 0 {
 		return -res
@@ -127,18 +154,23 @@ func iabs(x int) int {
 	return x
 }
 
+// ITU-T G.726, Annex A (32 kbit/s): quantizer decision levels table for QUAN search.
+// See the Annex A table for the 32 kbit/s quantizer decision thresholds (qtab_726_32).
 var quantTbl32 = [...]int32{-125, 79, 177, 245, 299, 348, 399, math.MaxInt32}
 
+// ITU-T G.726, Annex A (32 kbit/s): inverse quantizer table (dqlntab) for RECONST.
 var iquantTbl32 = [...]int16{
 	math.MinInt16, 4, 135, 213, 273, 323, 373, 425,
 	425, 373, 323, 273, 213, 135, 4, math.MinInt16,
 }
 
+// ITU-T G.726, Annex A (32 kbit/s): scale factor multiplier table (witab) for adaptation.
 var wTbl32 = [...]int16{
 	-12, 18, 41, 64, 112, 198, 355, 1122,
 	1122, 355, 198, 112, 64, 41, 18, -12,
 }
 
+// ITU-T G.726, Annex A (32 kbit/s): stationary/non-stationary indicator table (fitab).
 var fTbl32 = [...]uint8{
 	0, 0, 0, 1, 1, 1, 3, 7, 7, 3, 1, 1, 1, 0, 0, 0,
 }
@@ -151,7 +183,7 @@ func quantAdapt(c *g726Core, d int) int {
 		d = -d
 	}
 	exp := log2_16bitSaturating(d)
-	dln := ((exp << 7) + (((d << 7) >> exp) & 0x7f)) - (c.y >> 2)
+	dln := ((exp << g726LogFracBits) + (((d << g726LogFracBits) >> exp) & g726LogFracMask)) - (c.y >> 2)
 	for quantTbl32[i] < math.MaxInt32 && int(quantTbl32[i]) < dln {
 		i++
 	}
@@ -166,12 +198,12 @@ func quantAdapt(c *g726Core, d int) int {
 
 func inverseQuant(c *g726Core, i int) int16 {
 	dql := int(iquantTbl32[i]) + (c.y >> 2)
-	dex := (dql >> 7) & 0xf
-	dqt := (1 << 7) + (dql & 0x7f)
+	dex := (dql >> g726LogFracBits) & 0xf
+	dqt := (1 << g726LogFracBits) + (dql & g726LogFracMask)
 	if dql < 0 {
 		return 0
 	}
-	return int16((dqt << dex) >> 7)
+	return int16((dqt << dex) >> g726LogFracBits)
 }
 
 func g726DecodeUpdate(c *g726Core, I int) int16 {
@@ -215,9 +247,9 @@ func g726DecodeUpdate(c *g726Core, I int) int16 {
 	} else {
 		fa1 := clipIntp2((-c.a[0]*c.pk[0]*pk0)>>5, 8)
 		c.a[1] += 128*pk0*c.pk[1] + fa1 - (c.a[1] >> 7)
-		c.a[1] = clipInt(c.a[1], -12288, 12288)
+		c.a[1] = clipInt(c.a[1], -g726A2Limit, g726A2Limit)
 		c.a[0] += 64*3*pk0*c.pk[0] - (c.a[0] >> 8)
-		c.a[0] = clipInt(c.a[0], -(15360 - c.a[1]), 15360-c.a[1])
+		c.a[0] = clipInt(c.a[0], -(g726A1LimitBase - c.a[1]), g726A1LimitBase-c.a[1])
 		for i := range c.b {
 			c.b[i] += 128*dq0*sgn(-int(c.dq[i].sign)) - (c.b[i] >> 8)
 		}
@@ -238,7 +270,7 @@ func g726DecodeUpdate(c *g726Core, I int) int16 {
 	c.dq[0].sign = uint8(I_sig)
 
 	c.td = 0
-	if c.a[1] < -11776 {
+	if c.a[1] < g726ToneA2Threshold {
 		c.td = 1
 	}
 
@@ -253,7 +285,7 @@ func g726DecodeUpdate(c *g726Core, I int) int16 {
 		}
 	}
 
-	c.yu = clipInt(c.y+int(wTbl32[I])+((-c.y)>>5), 544, 5120)
+	c.yu = clipInt(c.y+int(wTbl32[I])+((-c.y)>>5), g726YuMin, g726YuMax)
 	c.yl += c.yu + ((-c.yl) >> 6)
 
 	al := c.ap >> 2

@@ -90,10 +90,3 @@ func (b *PCMBuffer) Read(n int) []byte {
 	b.n -= n
 	return out
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

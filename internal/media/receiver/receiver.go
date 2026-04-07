@@ -89,7 +89,7 @@ func (r *Receiver) Start() error {
 
 func (r *Receiver) StartBySoundType(soundType int) error {
 	r.mu.Lock()
-	if r.playing {
+	if r.doneCh != nil || r.playing {
 		r.mu.Unlock()
 		return nil
 	}

@@ -30,26 +30,17 @@ func LoadPCM8kMono(path string) ([]int16, error) {
 		return nil, errors.New("invalid mp3 decoded pcm length")
 	}
 
-	src := make([]int16, 0, len(raw)/2)
-	for i := 0; i+1 < len(raw); i += 2 {
-		v := int16(uint16(raw[i]) | uint16(raw[i+1])<<8)
-		src = append(src, v)
+	mono := make([]int16, 0, len(raw)/4)
+	for i := 0; i+3 < len(raw); i += 4 {
+		l := int16(uint16(raw[i]) | uint16(raw[i+1])<<8)
+		r := int16(uint16(raw[i+2]) | uint16(raw[i+3])<<8)
+		mono = append(mono, int16((int32(l)+int32(r))/2))
 	}
-	if len(src) == 0 {
-		return nil, errors.New("empty decoded pcm")
-	}
-
-	stereo := make([]int16, 0, len(src)/2)
-	for i := 0; i+1 < len(src); i += 2 {
-		l := int32(src[i])
-		r := int32(src[i+1])
-		stereo = append(stereo, int16((l+r)/2))
-	}
-	if len(stereo) == 0 {
+	if len(mono) == 0 {
 		return nil, errors.New("empty mono pcm")
 	}
 
-	return resampleNearest(stereo, decoder.SampleRate(), 8000), nil
+	return resampleNearest(mono, decoder.SampleRate(), 8000), nil
 }
 
 func resampleNearest(in []int16, inRate int, outRate int) []int16 {

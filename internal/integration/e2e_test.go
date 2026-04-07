@@ -167,6 +167,9 @@ func TestE2ESoundStartStop(t *testing.T) {
 		if res.err != nil {
 			t.Fatalf("brs error: %v", res.err)
 		}
+		if res.stats.Received == 0 {
+			t.Fatalf("expected Received>0, got %d (expected=%d lost=%d)", res.stats.Received, res.stats.Expected(), res.stats.Lost())
+		}
 		if got := res.stats.Lost(); got != 0 {
 			t.Fatalf("expected Lost()==0, got %d (received=%d expected=%d)", got, res.stats.Received, res.stats.Expected())
 		}

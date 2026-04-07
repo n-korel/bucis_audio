@@ -90,14 +90,11 @@ func (s *Sender) StreamAt(ctx context.Context, t0 int64, pcm []int16) error {
 		if err != nil {
 			return err
 		}
-		if s.closed.Load() {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			return net.ErrClosed
-		}
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if s.closed.Load() {
+			return net.ErrClosed
 		}
 		if _, err := s.conn.Write(raw); err != nil {
 			if ctx.Err() != nil && errors.Is(err, net.ErrClosed) {
