@@ -18,90 +18,9 @@ import (
 	"announcer_simulator/internal/control/udp"
 	"announcer_simulator/internal/infra/config"
 	"announcer_simulator/internal/media/receiver"
+	"announcer_simulator/internal/session"
 	"announcer_simulator/pkg/log"
 )
-
-type sessionState struct {
-	mu sync.Mutex
-
-	sessionID      string
-	scheduledT0    int64
-	timer          *time.Timer
-	playbackActive bool
-}
-
-func (s *sessionState) Snapshot() (sessionID string, playbackActive bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sessionID, s.playbackActive
-}
-
-func (s *sessionState) CurrentID() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sessionID
-}
-
-func (s *sessionState) clearSessionLocked() (prevID string, prevT0 int64) {
-	prevID = s.sessionID
-	prevT0 = s.scheduledT0
-	s.sessionID = ""
-	s.scheduledT0 = 0
-	s.playbackActive = false
-	if s.timer != nil {
-		s.timer.Stop()
-		s.timer = nil
-	}
-	return prevID, prevT0
-}
-
-func (s *sessionState) MarkPlaybackStarted() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.playbackActive = true
-}
-
-func (s *sessionState) PlaybackActive() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.playbackActive
-}
-
-func (s *sessionState) Stop() (prevID string, prevT0 int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.clearSessionLocked()
-}
-
-func (s *sessionState) StopIfSession(wantID string) (prevID string, prevT0 int64, ok bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.sessionID == "" || s.sessionID != wantID {
-		return "", 0, false
-	}
-	prevID, prevT0 = s.clearSessionLocked()
-	return prevID, prevT0, true
-}
-
-func (s *sessionState) ScheduleStart(sch scheduler.Scheduler, sessionID string, t0 int64, fn func()) {
-	s.mu.Lock()
-	if s.timer != nil {
-		s.timer.Stop()
-		s.timer = nil
-	}
-	s.sessionID = sessionID
-	s.scheduledT0 = t0
-	s.timer = sch.Schedule(t0, func() {
-		s.mu.Lock()
-		if s.sessionID != sessionID {
-			s.mu.Unlock()
-			return
-		}
-		s.mu.Unlock()
-		fn()
-	})
-	s.mu.Unlock()
-}
 
 func main() {
 	var (
@@ -115,14 +34,14 @@ func main() {
 		metricsReplyPort  int
 	)
 
-	flag.StringVar(&controlAddr, "control-addr", "", "UDP broadcast адрес (default из CONTROL_ADDR / автоопределение)")
-	flag.IntVar(&controlPort, "control-port", 0, "UDP порт (default из CONTROL_PORT)")
-	flag.IntVar(&mediaPort, "media-port", 0, "RTP media port (default из MEDIA_PORT)")
+	flag.StringVar(&controlAddr, "control-addr", "", "UDP broadcast address (default from CONTROL_ADDR / auto-detect)")
+	flag.IntVar(&controlPort, "control-port", 0, "UDP port (default from CONTROL_PORT)")
+	flag.IntVar(&mediaPort, "media-port", 0, "RTP media port (default from MEDIA_PORT)")
 
-	flag.StringVar(&metricsAddr, "metrics-addr", "", "UDP адрес метрик (default из METRICS_ADDR, fallback=control-addr)")
-	flag.IntVar(&metricsListenPort, "metrics-listen-port", 0, "UDP порт для приема get_metrics (default из METRICS_LISTEN_PORT)")
-	flag.IntVar(&metricsSendPort, "metrics-send-port", 0, "UDP порт назначения для отправки метрик (default из METRICS_SEND_PORT)")
-	flag.IntVar(&metricsReplyPort, "metrics-reply-port", 0, "UDP порт ответа на get_metrics (default из METRICS_REPLY_PORT)")
+	flag.StringVar(&metricsAddr, "metrics-addr", "", "Metrics UDP address (default from METRICS_ADDR, fallback=control-addr)")
+	flag.IntVar(&metricsListenPort, "metrics-listen-port", 0, "UDP port to receive get_metrics (default from METRICS_LISTEN_PORT)")
+	flag.IntVar(&metricsSendPort, "metrics-send-port", 0, "Destination UDP port for sending metrics (default from METRICS_SEND_PORT)")
+	flag.IntVar(&metricsReplyPort, "metrics-reply-port", 0, "UDP reply port for get_metrics (default from METRICS_REPLY_PORT)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -183,7 +102,7 @@ func main() {
 		return mediaRecv.Stop()
 	}
 
-	var state sessionState
+	var state session.State
 	buf := make([]byte, 2048)
 
 	type lastSessionStats struct {
@@ -475,28 +394,25 @@ func main() {
 		}
 
 		sessionID := start.SessionID
+		soundType := start.Type
 		logger.Info("sound_start received", "session_id", start.SessionID, "type", start.Type)
 		logger.Debug(
 			"scheduled playback start",
 			"session_id", sessionID,
 		)
 		state.ScheduleStart(s, sessionID, t0, func() {
-			state.mu.Lock()
-			if state.sessionID != sessionID {
-				state.mu.Unlock()
-				return
-			}
 			mediaStopMu.Lock()
-			if state.sessionID != sessionID {
-				mediaStopMu.Unlock()
-				state.mu.Unlock()
+			defer mediaStopMu.Unlock()
+
+			if !state.IsSession(sessionID) {
 				return
 			}
-			state.playbackActive = true
-			state.mu.Unlock()
 
-			err := mediaRecv.StartBySoundType(start.Type)
-			mediaStopMu.Unlock()
+			if !state.MarkPlaybackStartedIfSession(sessionID) {
+				return
+			}
+
+			err := mediaRecv.StartBySoundType(soundType)
 			if err != nil {
 				_, _, _ = state.StopIfSession(sessionID)
 				logger.Error("media receiver start failed", "err", err, "session_id", sessionID)
