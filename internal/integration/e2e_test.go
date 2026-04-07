@@ -2,7 +2,6 @@ package integration
 
 import (
 	"context"
-	"net"
 	"testing"
 	"time"
 
@@ -14,24 +13,10 @@ import (
 	"announcer_simulator/internal/session"
 )
 
-func freeUDPPort(t *testing.T) int {
-	t.Helper()
-	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-	if err != nil {
-		t.Fatalf("listen udp :0: %v", err)
-	}
-	port := c.LocalAddr().(*net.UDPAddr).Port
-	_ = c.Close()
-	return port
-}
-
 func TestE2ESoundStartStop(t *testing.T) {
 	t.Parallel()
 
 	const loopback = "127.0.0.1"
-
-	controlPort := freeUDPPort(t)
-	mediaPort := freeUDPPort(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -41,19 +26,26 @@ func TestE2ESoundStartStop(t *testing.T) {
 		err   error
 	}
 	resCh := make(chan result, 1)
+	startedCh := make(chan struct{}, 1)
+	controlPortCh := make(chan int, 1)
+	mediaPortCh := make(chan int, 1)
 
 	go func() {
-		recv, err := udp.Join(loopback, controlPort)
+		recv, err := udp.Join(loopback, 0)
 		if err != nil {
 			resCh <- result{err: err}
 			return
+		}
+		select {
+		case controlPortCh <- recv.LocalPort():
+		default:
 		}
 		defer func() { _ = recv.Close() }()
 
 		var (
 			s     scheduler.Scheduler
 			state session.State
-			rx    = receiver.New(mediaPort)
+			rx    = receiver.New(0)
 		)
 
 		buf := make([]byte, 2048)
@@ -81,11 +73,19 @@ func TestE2ESoundStartStop(t *testing.T) {
 				_, _ = state.Stop()
 				_, _ = rx.Stop()
 
+				// Contract: RTP receiver starts immediately after sound_start (do not wait for t0).
+				_ = rx.StartBySoundType(start.Type)
+				select {
+				case mediaPortCh <- rx.MediaPort():
+				default:
+				}
+				select {
+				case startedCh <- struct{}{}:
+				default:
+				}
+
 				state.ScheduleStart(s, start.SessionID, start.T0, func() {
-					if !state.MarkPlaybackStartedIfSession(start.SessionID) {
-						return
-					}
-					_ = rx.StartBySoundType(start.Type)
+					_ = state.MarkPlaybackStartedIfSession(start.SessionID)
 				})
 				continue
 			}
@@ -103,17 +103,21 @@ func TestE2ESoundStartStop(t *testing.T) {
 		}
 	}()
 
+	var controlPort int
+	select {
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting receiver bind: %v", ctx.Err())
+	case controlPort = <-controlPortCh:
+		if controlPort == 0 {
+			t.Fatalf("receiver reported empty control port")
+		}
+	}
+
 	controlSender, err := udp.NewSender(loopback, controlPort)
 	if err != nil {
 		t.Fatalf("control sender: %v", err)
 	}
 	defer func() { _ = controlSender.Close() }()
-
-	mediaSender, err := sender.New(loopback, mediaPort)
-	if err != nil {
-		t.Fatalf("media sender: %v", err)
-	}
-	defer func() { _ = mediaSender.Close() }()
 
 	pcm := make([]int16, 8000)
 	for i := range pcm {
@@ -126,6 +130,27 @@ func TestE2ESoundStartStop(t *testing.T) {
 	if _, err := controlSender.Send([]byte(protocol.FormatSoundStart(1, t0, sessionID))); err != nil {
 		t.Fatalf("send sound_start: %v", err)
 	}
+
+	var mediaPort int
+	select {
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting receiver start: %v", ctx.Err())
+	case <-startedCh:
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatalf("timeout waiting receiver media bind: %v", ctx.Err())
+	case mediaPort = <-mediaPortCh:
+		if mediaPort == 0 {
+			t.Fatalf("receiver reported empty media port")
+		}
+	}
+
+	mediaSender, err := sender.New(loopback, mediaPort)
+	if err != nil {
+		t.Fatalf("media sender: %v", err)
+	}
+	defer func() { _ = mediaSender.Close() }()
 
 	if err := mediaSender.StreamAt(ctx, t0, pcm); err != nil {
 		t.Fatalf("stream media: %v", err)
@@ -150,4 +175,3 @@ func TestE2ESoundStartStop(t *testing.T) {
 		}
 	}
 }
-

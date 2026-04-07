@@ -1,4 +1,4 @@
-.PHONY: build bucis brs brs-windows clean lint run-bucis run-bucis-mic run-brs
+.PHONY: build bucis brs brs-windows clean lint test run-bucis run-bucis-mic run-brs
 
 build: bucis brs
 
@@ -28,3 +28,6 @@ clean:
 
 lint:
 	golangci-lint run ./...
+
+test:
+	go test ./...

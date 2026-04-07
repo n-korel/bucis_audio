@@ -137,6 +137,17 @@ shutdownLoop:
 				fmt.Fprintf(os.Stderr, "media stream error: %v\n", err)
 				os.Exit(1)
 			}
+
+			grace := 120 * time.Millisecond
+			timer := time.NewTimer(grace)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				break shutdownLoop
+			case <-timer.C:
+			}
 		} else {
 			untilT0 := time.Until(time.UnixMilli(t0))
 			if untilT0 < 0 {

@@ -64,6 +64,16 @@ func Join(addr string, port int) (*Receiver, error) {
 	return &Receiver{conn: conn}, nil
 }
 
+func (r *Receiver) LocalPort() int {
+	if r == nil || r.conn == nil {
+		return 0
+	}
+	if a, ok := r.conn.LocalAddr().(*net.UDPAddr); ok {
+		return a.Port
+	}
+	return 0
+}
+
 func (r *Receiver) Close() error {
 	return r.conn.Close()
 }

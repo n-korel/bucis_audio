@@ -124,18 +124,15 @@ func noiseSamples(n int, seed int64, amp int16) []int16 {
 }
 
 func makeTestPCM() []int16 {
-	// Длина кратна 160, чтобы не спорить о хвосте и паддинге.
 	const frames = 80
 	const n = frames * samplesPerFrameG726
 
 	var out []int16
 	out = append(out, sineSamples(n, 1000, ffmpegSampleRate)...)
 
-	// Немного шума помогает ловить баги packing/таблиц, где синус может "простить".
 	out2 := noiseSamples(n, 1, 2500)
 	out = append(out, out2...)
 
-	// Тишина + импульсы.
 	out3 := make([]int16, n)
 	for i := 0; i < len(out3); i += 400 {
 		out3[i] = 12000
@@ -153,8 +150,8 @@ func encodeWithFFmpegToRawG726(t *testing.T, ffmpegPath string, pcm []int16, cod
 		t.Fatalf("write pcm: %v", err)
 	}
 
-	// Формат зависит от варианта упаковки.
-	// - g726  -> -f g726   (big-endian / "left-justified")
+	// Container format depends on the bit-packing variant:
+	// - g726   -> -f g726   (big-endian / "left-justified")
 	// - g726le -> -f g726le (little-endian / "right-justified")
 	format := "g726"
 	if codec == "g726le" {
@@ -222,9 +219,8 @@ func TestG726CrossCheck_FFmpegEncode_OursDecode(t *testing.T) {
 	tmp := t.TempDir()
 	g726Path := filepath.Join(tmp, "out.g726")
 
-	// Наша упаковка "low nibble first" соответствует ffmpeg raw g726le.
-	// На некоторых сборках может отличаться, поэтому оставляем fallback на g726,
-	// но НЕ считаем его обязательным.
+	// Our "low nibble first" packing matches ffmpeg raw g726le on most builds.
+	// Keep g726 as a fallback since ffmpeg packaging can vary across builds.
 	candidates := []string{"g726le", "g726"}
 
 	var errs []error
@@ -242,8 +238,7 @@ func TestG726CrossCheck_FFmpegEncode_OursDecode(t *testing.T) {
 		got = got[:len(pcm)]
 
 		m := calcMetrics(pcm, got, warmup)
-		// Здесь опираемся в основном на RMS: maxAbs на импульсах может быть большим,
-		// но "не тот packing" даёт очень высокий RMS по всему сигналу.
+		// RMS is the primary mismatch signal; maxAbs can spike on impulses.
 		if m.rms <= 700 && m.maxAbs <= 20000 {
 			return
 		}
@@ -271,9 +266,8 @@ func TestG726CrossCheck_OursEncode_FFmpegDecode(t *testing.T) {
 		t.Fatalf("write g726: %v", err)
 	}
 
-	// У ffmpeg демультиплексор/декодер выбирается по -f g726.
-	// Если формат/packing несовместимы, ffmpeg может либо упасть, либо выдать очень плохой PCM — поймаем метрикой.
-	// Наша упаковка соответствует raw little-endian g726le.
+	// If format/packing are incompatible, ffmpeg may fail or produce very bad PCM — metrics should catch it.
+	// Our packing corresponds to raw little-endian g726le.
 	decodeWithFFmpegRawG726ToPCM(t, ffmpegPath, inG726Path, "g726le", outPCMPath)
 	got, err := readS16LE(outPCMPath)
 	if err != nil {
@@ -285,7 +279,7 @@ func TestG726CrossCheck_OursEncode_FFmpegDecode(t *testing.T) {
 	got = got[:len(pcm)]
 
 	m := calcMetrics(pcm, got, warmup)
-	// RMS — основной сигнал несовместимости; maxAbs держим мягким (импульсы).
+	// RMS is the primary mismatch signal; keep maxAbs lenient due to impulses.
 	if m.rms > 700 || m.maxAbs > 20000 {
 		t.Fatalf("metrics too high: maxAbs=%d rms=%.2f", m.maxAbs, m.rms)
 	}
@@ -294,8 +288,6 @@ func TestG726CrossCheck_OursEncode_FFmpegDecode(t *testing.T) {
 func TestG726CrossCheck_SmokeFFmpegG726Demuxer(t *testing.T) {
 	ffmpegPath := requireFFmpeg(t)
 
-	// Дымовой тест: убеждаемся, что ffmpeg вообще понимает -f g726.
-	// Это снижает шанс "немых" пропусков, когда cross-тесты начинают падать из-за окружения.
 	tmp := t.TempDir()
 	inPCM := filepath.Join(tmp, "in.pcm")
 	outG726 := filepath.Join(tmp, "out.g726")
@@ -306,7 +298,6 @@ func TestG726CrossCheck_SmokeFFmpegG726Demuxer(t *testing.T) {
 		t.Fatalf("write pcm: %v", err)
 	}
 
-	// Пробуем кодек по умолчанию g726le, и если не получилось — считаем это ошибкой окружения.
 	_, err := runFFmpeg(ffmpegPath,
 		"-hide_banner", "-loglevel", "error",
 		"-f", "s16le", "-ar", fmt.Sprint(ffmpegSampleRate), "-ac", "1", "-i", inPCM,

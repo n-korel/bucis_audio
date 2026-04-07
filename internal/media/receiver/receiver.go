@@ -60,6 +60,7 @@ type Receiver struct {
 	doneCh  chan struct{}
 	stats   SessionStats
 	runErr  error
+	pcmSink func(pcm []int16)
 
 	connMu sync.Mutex
 	conn   *net.UDPConn
@@ -74,6 +75,12 @@ func New(mediaPort int) *Receiver {
 	return &Receiver{
 		mediaPort: mediaPort,
 	}
+}
+
+func (r *Receiver) SetPCMSink(fn func(pcm []int16)) {
+	r.mu.Lock()
+	r.pcmSink = fn
+	r.mu.Unlock()
 }
 
 func (r *Receiver) Start() error {
@@ -94,6 +101,9 @@ func (r *Receiver) StartBySoundType(soundType int) error {
 		if err != nil {
 			r.mu.Unlock()
 			return err
+		}
+		if a, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+			r.mediaPort = a.Port
 		}
 		r.connMu.Lock()
 		r.conn = conn
@@ -129,6 +139,12 @@ func (r *Receiver) StartBySoundType(soundType int) error {
 		close(doneCh)
 	}
 	return nil
+}
+
+func (r *Receiver) MediaPort() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.mediaPort
 }
 
 func (r *Receiver) Stop() (SessionStats, error) {
@@ -227,7 +243,13 @@ func (r *Receiver) runRTP(conn *net.UDPConn, stopCh <-chan struct{}, doneCh chan
 			continue
 		}
 
-		_ = g726.G726DecodeFrame(pkt.Payload, decState)
+		pcm := g726.G726DecodeFrame(pkt.Payload, decState)
+		r.mu.Lock()
+		sink := r.pcmSink
+		r.mu.Unlock()
+		if sink != nil {
+			sink(pcm)
+		}
 		r.updateStats(pkt.SequenceNumber, pkt.Timestamp)
 	}
 }

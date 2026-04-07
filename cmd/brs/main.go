@@ -8,11 +8,13 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"announcer_simulator/internal/audio"
 	"announcer_simulator/internal/control/protocol"
 	"announcer_simulator/internal/control/scheduler"
 	"announcer_simulator/internal/control/udp"
@@ -21,6 +23,29 @@ import (
 	"announcer_simulator/internal/session"
 	"announcer_simulator/pkg/log"
 )
+
+func buildInfoString() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok || bi == nil {
+		return "unknown"
+	}
+	var rev, dirty string
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			dirty = s.Value
+		}
+	}
+	if rev == "" {
+		return bi.GoVersion
+	}
+	if dirty == "true" {
+		return rev + " (modified)"
+	}
+	return rev
+}
 
 func main() {
 	var (
@@ -33,16 +58,22 @@ func main() {
 		metricsSendPort   int
 		metricsReplyPort  int
 	)
+	var printVersion bool
 
 	flag.StringVar(&controlAddr, "control-addr", "", "UDP broadcast address (default from CONTROL_ADDR / auto-detect)")
 	flag.IntVar(&controlPort, "control-port", 0, "UDP port (default from CONTROL_PORT)")
 	flag.IntVar(&mediaPort, "media-port", 0, "RTP media port (default from MEDIA_PORT)")
+	flag.BoolVar(&printVersion, "version", false, "print build version and exit")
 
 	flag.StringVar(&metricsAddr, "metrics-addr", "", "Metrics UDP address (default from METRICS_ADDR, fallback=control-addr)")
 	flag.IntVar(&metricsListenPort, "metrics-listen-port", 0, "UDP port to receive get_metrics (default from METRICS_LISTEN_PORT)")
 	flag.IntVar(&metricsSendPort, "metrics-send-port", 0, "Destination UDP port for sending metrics (default from METRICS_SEND_PORT)")
 	flag.IntVar(&metricsReplyPort, "metrics-reply-port", 0, "UDP reply port for get_metrics (default from METRICS_REPLY_PORT)")
 	flag.Parse()
+	if printVersion {
+		fmt.Println(buildInfoString())
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -78,6 +109,7 @@ func main() {
 
 	log.Init(os.Getenv("LOG_FORMAT"))
 	logger := log.With("node", brsName, "role", "brs")
+	logger.Info("brs started", "build", buildInfoString())
 
 	recv, err := udp.Join(cfg.ControlAddr, cfg.ControlPort)
 	if err != nil {
@@ -94,11 +126,19 @@ func main() {
 
 	s := scheduler.Scheduler{}
 	mediaRecv := receiver.New(cfg.MediaPort)
+	pcmBuf := audio.NewPCMBuffer(4800) // ~300ms @ 8kHz mono S16LE
+	var audioCtl audio.Controller
+
+	mediaRecv.SetPCMSink(func(pcm []int16) {
+		pcmBuf.Write(audio.PCM16ToBytesLE(pcm))
+	})
 
 	var mediaStopMu sync.Mutex
 	stopPlayback := func() (stats receiver.SessionStats, err error) {
 		mediaStopMu.Lock()
 		defer mediaStopMu.Unlock()
+		audioCtl.Stop()
+		pcmBuf.Reset()
 		return mediaRecv.Stop()
 	}
 
@@ -396,10 +436,17 @@ func main() {
 		sessionID := start.SessionID
 		soundType := start.Type
 		logger.Info("sound_start received", "session_id", start.SessionID, "type", start.Type)
-		logger.Debug(
-			"scheduled playback start",
-			"session_id", sessionID,
-		)
+
+		pcmBuf.Reset()
+
+		if soundType == 1 {
+			if err := mediaRecv.StartBySoundType(soundType); err != nil {
+				logger.Error("media receiver start failed", "err", err, "session_id", sessionID)
+				continue
+			}
+		}
+
+		logger.Debug("scheduled playback start", "session_id", sessionID)
 		state.ScheduleStart(s, sessionID, t0, func() {
 			mediaStopMu.Lock()
 			defer mediaStopMu.Unlock()
@@ -412,11 +459,15 @@ func main() {
 				return
 			}
 
-			err := mediaRecv.StartBySoundType(soundType)
-			if err != nil {
-				_, _, _ = state.StopIfSession(sessionID)
-				logger.Error("media receiver start failed", "err", err, "session_id", sessionID)
-				return
+			if soundType == 1 {
+				if time.Now().UnixMilli() > t0 {
+					pcmBuf.Reset()
+				}
+				if err := audioCtl.StartAt(t0, pcmBuf); err != nil {
+					_, _, _ = state.StopIfSession(sessionID)
+					logger.Error("audio output start failed", "err", err, "session_id", sessionID)
+					return
+				}
 			}
 			startDelta := time.Now().UnixMilli() - t0
 			logger.Info("playback started", "session_id", sessionID, "start_delta_ms", startDelta)
