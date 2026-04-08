@@ -41,7 +41,9 @@ func (c *Controller) Stop() {
 		return
 	}
 	close(stopCh)
-	<-doneCh
+	if doneCh != nil {
+		<-doneCh
+	}
 
 	if stdin != nil {
 		_ = stdin.Close()

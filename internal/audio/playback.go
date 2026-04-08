@@ -103,7 +103,9 @@ func (c *Controller) Stop() {
 		return
 	}
 	close(stopCh)
-	<-doneCh
+	if doneCh != nil {
+		<-doneCh
+	}
 }
 
 func (c *Controller) StartAt(t0Ms int64, buf *PCMBuffer) error {

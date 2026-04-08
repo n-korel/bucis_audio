@@ -141,25 +141,79 @@ func (s *brsService) Run(ctx context.Context) error {
 	var lastMu sync.Mutex
 	var last lastSessionStats
 
+	var metricsMu sync.Mutex
+	var metricsConn *net.UDPConn
+	var metricsResolveOnce sync.Once
+	var metricsRaddr *net.UDPAddr
+	var metricsResolveErr error
+	resolveMetricsAddr := func() (*net.UDPAddr, error) {
+		metricsResolveOnce.Do(func() {
+			if s.cfg.MetricsAddr == "" || s.cfg.MetricsSendPort == 0 {
+				metricsResolveErr = fmt.Errorf("metrics disabled")
+				return
+			}
+			metricsRaddr, metricsResolveErr = net.ResolveUDPAddr("udp4", fmt.Sprintf("%s:%d", s.cfg.MetricsAddr, s.cfg.MetricsSendPort))
+		})
+		return metricsRaddr, metricsResolveErr
+	}
+	closeMetricsConn := func() {
+		metricsMu.Lock()
+		defer metricsMu.Unlock()
+		if metricsConn == nil {
+			return
+		}
+		_ = metricsConn.Close()
+		metricsConn = nil
+	}
+	defer closeMetricsConn()
+
 	metricsSend := func(payload string) {
-		if s.cfg.MetricsAddr == "" || s.cfg.MetricsSendPort == 0 {
-			return
-		}
-		raddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("%s:%d", s.cfg.MetricsAddr, s.cfg.MetricsSendPort))
+		raddr, err := resolveMetricsAddr()
 		if err != nil {
-			s.logger.Warn("metrics resolve failed", "err", err, "addr", s.cfg.MetricsAddr, "port", s.cfg.MetricsSendPort)
 			return
 		}
-		conn, err := net.DialUDP("udp4", nil, raddr)
+
+		getConn := func() (*net.UDPConn, error) {
+			metricsMu.Lock()
+			defer metricsMu.Unlock()
+			if metricsConn != nil {
+				return metricsConn, nil
+			}
+			conn, derr := net.DialUDP("udp4", nil, raddr)
+			if derr != nil {
+				return nil, derr
+			}
+			metricsConn = conn
+			return metricsConn, nil
+		}
+
+		conn, err := getConn()
+		if err != nil {
+			s.logger.Warn("metrics dial failed", "err", err, "addr", s.cfg.MetricsAddr, "port", s.cfg.MetricsSendPort)
+			return
+		}
+
+		_ = conn.SetWriteDeadline(s.deps.Now().Add(200 * time.Millisecond))
+		n, werr := conn.Write([]byte(payload))
+		if werr == nil {
+			s.logger.Debug("metrics sent", "addr", s.cfg.MetricsAddr, "port", s.cfg.MetricsSendPort, "bytes", n)
+			return
+		}
+
+		s.logger.Warn("metrics send failed", "err", werr, "addr", s.cfg.MetricsAddr, "port", s.cfg.MetricsSendPort)
+		closeMetricsConn()
+
+		// One reconnect retry on transient socket errors.
+		conn, err = getConn()
 		if err != nil {
 			s.logger.Warn("metrics dial failed", "err", err, "addr", s.cfg.MetricsAddr, "port", s.cfg.MetricsSendPort)
 			return
 		}
 		_ = conn.SetWriteDeadline(s.deps.Now().Add(200 * time.Millisecond))
-		n, werr := conn.Write([]byte(payload))
-		_ = conn.Close()
+		n, werr = conn.Write([]byte(payload))
 		if werr != nil {
 			s.logger.Warn("metrics send failed", "err", werr, "addr", s.cfg.MetricsAddr, "port", s.cfg.MetricsSendPort)
+			closeMetricsConn()
 			return
 		}
 		s.logger.Debug("metrics sent", "addr", s.cfg.MetricsAddr, "port", s.cfg.MetricsSendPort, "bytes", n)
@@ -299,23 +353,26 @@ func (s *brsService) Run(ctx context.Context) error {
 				return
 			}
 
+			mediaStopMu.Lock()
 			sessionID, playbackActive := state.Snapshot()
 			isPlaying := mediaRecv.IsPlaying()
 			lastPktAt := mediaRecv.LastPacketAt()
 
 			if playbackActive && !isPlaying {
 				if ctx.Err() != nil {
+					mediaStopMu.Unlock()
 					return
 				}
 				if sessionID == "" {
+					mediaStopMu.Unlock()
 					cand = nil
 					continue
 				}
 				if ctx.Err() != nil {
+					mediaStopMu.Unlock()
 					return
 				}
 
-				mediaStopMu.Lock()
 				prevID, _, ok := state.StopIfSession(sessionID)
 				if !ok {
 					mediaStopMu.Unlock()
@@ -334,35 +391,40 @@ func (s *brsService) Run(ctx context.Context) error {
 			}
 
 			if !isPlaying {
+				mediaStopMu.Unlock()
 				cand = nil
 				continue
 			}
 
 			if !playbackActive || sessionID == "" {
+				mediaStopMu.Unlock()
 				cand = nil
 				continue
 			}
 
 			if lastPktAt.IsZero() || s.deps.Now().Sub(lastPktAt) <= rtpIdleTimeout {
+				mediaStopMu.Unlock()
 				cand = nil
 				continue
 			}
 
 			if cand == nil || cand.sessionID != sessionID {
+				mediaStopMu.Unlock()
 				cand = &idleCandidate{sessionID: sessionID, lastPktAt: lastPktAt}
 				continue
 			}
 
 			if lastPktAt.After(cand.lastPktAt) {
+				mediaStopMu.Unlock()
 				cand = &idleCandidate{sessionID: sessionID, lastPktAt: lastPktAt}
 				continue
 			}
 
 			if ctx.Err() != nil {
+				mediaStopMu.Unlock()
 				return
 			}
 
-			mediaStopMu.Lock()
 			prevID, _, ok := state.StopIfSession(sessionID)
 			if !ok {
 				mediaStopMu.Unlock()

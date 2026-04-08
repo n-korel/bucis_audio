@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+func resetDotEnv(t *testing.T) {
+	t.Helper()
+	resetDotEnvForTest()
+	t.Cleanup(resetDotEnvForTest)
+}
+
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "config_test")
 	if err != nil {
@@ -18,6 +24,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestParseBrs_Defaults(t *testing.T) {
+	resetDotEnv(t)
 	t.Setenv("CONTROL_ADDR", "")
 	t.Setenv("CONTROL_PORT", "")
 	t.Setenv("MEDIA_PORT", "")
@@ -45,6 +52,7 @@ func TestParseBrs_Defaults(t *testing.T) {
 }
 
 func TestParseBrs_CustomIntInvalid(t *testing.T) {
+	resetDotEnv(t)
 	t.Setenv("CONTROL_PORT", "x")
 
 	_, err := ParseBrs()
@@ -54,6 +62,7 @@ func TestParseBrs_CustomIntInvalid(t *testing.T) {
 }
 
 func TestParseBucis_OK(t *testing.T) {
+	resetDotEnv(t)
 	t.Setenv("CONTROL_OFFSET_MS", "100")
 	t.Setenv("CONTROL_ADDR", "127.0.0.1")
 	t.Setenv("CONTROL_PORT", "1")
@@ -74,6 +83,7 @@ func TestParseBucis_OK(t *testing.T) {
 }
 
 func TestParseBucis_OffsetFallbackKey(t *testing.T) {
+	resetDotEnv(t)
 	t.Setenv("CONTROL_OFFSET_MS", "")
 	t.Setenv("OFFSET_MS", "-50")
 	t.Setenv("CONTROL_ADDR", "127.0.0.1")
@@ -92,6 +102,7 @@ func TestParseBucis_OffsetFallbackKey(t *testing.T) {
 }
 
 func TestParseBucis_RequiredMissing(t *testing.T) {
+	resetDotEnv(t)
 	t.Setenv("CONTROL_ADDR", "")
 	t.Setenv("CONTROL_PORT", "")
 	t.Setenv("MEDIA_PORT", "")
@@ -108,6 +119,7 @@ func TestParseBucis_RequiredMissing(t *testing.T) {
 }
 
 func TestParseBucis_InvalidPort(t *testing.T) {
+	resetDotEnv(t)
 	t.Setenv("CONTROL_OFFSET_MS", "0")
 	t.Setenv("CONTROL_ADDR", "127.0.0.1")
 	t.Setenv("CONTROL_PORT", "nope")
