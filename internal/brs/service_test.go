@@ -385,6 +385,7 @@ func TestServiceMetricsGetMetricsUDPReply(t *testing.T) {
 
 	listenPort := freeUDPPort(t, net.IPv4zero)
 	replyPort := freeUDPPort(t, net.IPv4(127, 0, 0, 1))
+	unusedCfgReplyPort := freeUDPPort(t, net.IPv4(127, 0, 0, 1))
 
 	ctrl := newFakeControlReceiver()
 	defer func() { _ = ctrl.Close() }()
@@ -396,7 +397,7 @@ func TestServiceMetricsGetMetricsUDPReply(t *testing.T) {
 		MediaPort:         0,
 		MetricsAddr:       "127.0.0.1",
 		MetricsListenPort: listenPort,
-		MetricsReplyPort:  replyPort,
+		MetricsReplyPort:  unusedCfgReplyPort,
 		MetricsSendPort:   0,
 	}, "metric-node", nil, Deps{
 		JoinControl: func(addr string, port int) (controlReceiver, error) { return ctrl, nil },
@@ -424,7 +425,7 @@ func TestServiceMetricsGetMetricsUDPReply(t *testing.T) {
 		_ = ctrl.Close()
 		t.Fatalf("ResolveUDPAddr: %v", err)
 	}
-	_, err = clientConn.WriteToUDP([]byte("get_metrics"), serverAddr)
+	_, err = clientConn.WriteToUDP([]byte("get_metrics;"+strconv.Itoa(replyPort)), serverAddr)
 	if err != nil {
 		cancel()
 		_ = ctrl.Close()

@@ -98,7 +98,7 @@ func ParseBrs() (Brs, error) {
 		return Brs{}, err
 	}
 
-	metricsSendPort, err := getEnvIntDefault("METRICS_SEND_PORT", 8892)
+	metricsSendPort, err := getEnvIntDefault("METRICS_SEND_PORT", 0)
 	if err != nil {
 		return Brs{}, err
 	}

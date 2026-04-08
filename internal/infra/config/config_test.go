@@ -39,7 +39,7 @@ func TestParseBrs_Defaults(t *testing.T) {
 	if cfg.MetricsAddr != cfg.ControlAddr {
 		t.Fatalf("MetricsAddr=%q want %q", cfg.MetricsAddr, cfg.ControlAddr)
 	}
-	if cfg.MetricsListenPort != 8892 || cfg.MetricsSendPort != 8892 || cfg.MetricsReplyPort != 8881 {
+	if cfg.MetricsListenPort != 8892 || cfg.MetricsSendPort != 0 || cfg.MetricsReplyPort != 8881 {
 		t.Fatalf("metrics ports: listen=%d send=%d reply=%d", cfg.MetricsListenPort, cfg.MetricsSendPort, cfg.MetricsReplyPort)
 	}
 }

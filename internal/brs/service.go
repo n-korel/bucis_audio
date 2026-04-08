@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -123,9 +124,7 @@ func (s *brsService) Run(ctx context.Context) error {
 	})
 
 	var mediaStopMu sync.Mutex
-	stopPlayback := func() (stats receiver.SessionStats, err error) {
-		mediaStopMu.Lock()
-		defer mediaStopMu.Unlock()
+	stopPlaybackLocked := func() (stats receiver.SessionStats, err error) {
 		audioOut.Stop()
 		pcmBuf.Reset()
 		return mediaRecv.Stop()
@@ -232,7 +231,15 @@ func (s *brsService) Run(ctx context.Context) error {
 			}
 
 			msg := strings.TrimSpace(string(buf[:n]))
-			if msg != "get_metrics" {
+			if msg == "" {
+				continue
+			}
+
+			// Expected request: "get_metrics" optionally with reply port, e.g. "get_metrics;8881" or "get_metrics 8881".
+			fields := strings.FieldsFunc(msg, func(r rune) bool {
+				return r == ';' || r == ' ' || r == '\t'
+			})
+			if len(fields) == 0 || fields[0] != "get_metrics" {
 				continue
 			}
 			s.logger.Debug("get_metrics received", "from_ip", raddr.IP.String(), "from_port", raddr.Port)
@@ -246,10 +253,23 @@ func (s *brsService) Run(ctx context.Context) error {
 				payload = formatRTPMetrics(s.name, snap.sessionID, snap.stats)
 			}
 
-			if s.cfg.MetricsReplyPort == 0 {
+			replyPort := 0
+			if len(fields) >= 2 && fields[1] != "" {
+				if p, perr := strconv.Atoi(fields[1]); perr == nil && p > 0 && p <= 65535 {
+					replyPort = p
+				}
+			}
+			if replyPort == 0 && raddr.Port > 0 {
+				replyPort = raddr.Port
+			}
+			if replyPort == 0 && s.cfg.MetricsReplyPort > 0 {
+				replyPort = s.cfg.MetricsReplyPort
+			}
+			if replyPort == 0 {
 				continue
 			}
-			dst := &net.UDPAddr{IP: raddr.IP, Port: s.cfg.MetricsReplyPort}
+
+			dst := &net.UDPAddr{IP: raddr.IP, Port: replyPort}
 			wrote, _ := conn.WriteToUDP([]byte(payload), dst)
 			s.logger.Debug("metrics reply sent", "to_ip", dst.IP.String(), "to_port", dst.Port, "bytes", wrote)
 		}
@@ -291,15 +311,19 @@ func (s *brsService) Run(ctx context.Context) error {
 					cand = nil
 					continue
 				}
-				prevID, _, ok := state.StopIfSession(sessionID)
-				if !ok {
-					cand = nil
-					continue
-				}
 				if ctx.Err() != nil {
 					return
 				}
-				stats, recvErr := stopPlayback()
+
+				mediaStopMu.Lock()
+				prevID, _, ok := state.StopIfSession(sessionID)
+				if !ok {
+					mediaStopMu.Unlock()
+					cand = nil
+					continue
+				}
+				stats, recvErr := stopPlaybackLocked()
+				mediaStopMu.Unlock()
 				if recvErr != nil {
 					s.logger.Warn("media receiver stopped with error", "err", recvErr, "session_id", prevID)
 				}
@@ -334,16 +358,20 @@ func (s *brsService) Run(ctx context.Context) error {
 				continue
 			}
 
+			if ctx.Err() != nil {
+				return
+			}
+
+			mediaStopMu.Lock()
 			prevID, _, ok := state.StopIfSession(sessionID)
 			if !ok {
+				mediaStopMu.Unlock()
 				cand = nil
 				continue
 			}
 			sessionID = prevID
-			if ctx.Err() != nil {
-				return
-			}
-			stats, recvErr := stopPlayback()
+			stats, recvErr := stopPlaybackLocked()
+			mediaStopMu.Unlock()
 			if recvErr != nil {
 				s.logger.Warn("media receiver error on stop", "err", recvErr, "session_id", sessionID)
 			}
@@ -358,8 +386,10 @@ func (s *brsService) Run(ctx context.Context) error {
 		if err != nil {
 			select {
 			case <-ctx.Done():
+				mediaStopMu.Lock()
 				prevID, _ := state.Stop()
-				stats, recvErr := stopPlayback()
+				stats, recvErr := stopPlaybackLocked()
+				mediaStopMu.Unlock()
 				if prevID != "" {
 					s.logger.Info("playback stopping (shutdown)")
 					if recvErr != nil {
@@ -392,8 +422,10 @@ func (s *brsService) Run(ctx context.Context) error {
 				s.logger.Info("sound_stop received", logFields...)
 			}
 
+			mediaStopMu.Lock()
 			prevID, prevT0 := state.Stop()
-			stats, recvErr := stopPlayback()
+			stats, recvErr := stopPlaybackLocked()
+			mediaStopMu.Unlock()
 			if prevID != "" {
 				if recvErr != nil {
 					s.logger.Warn("media receiver error on stop", "err", recvErr, "session_id", prevID)
@@ -422,8 +454,10 @@ func (s *brsService) Run(ctx context.Context) error {
 			continue
 		}
 
+		mediaStopMu.Lock()
 		oldSessionID, _ := state.Stop()
-		stats, recvErr := stopPlayback()
+		stats, recvErr := stopPlaybackLocked()
+		mediaStopMu.Unlock()
 		if oldSessionID != "" {
 			s.logger.Warn("session replaced", "old_session_id", oldSessionID, "new_session_id", start.SessionID)
 			if recvErr != nil {
@@ -440,15 +474,23 @@ func (s *brsService) Run(ctx context.Context) error {
 		pcmBuf.Reset()
 
 		if soundType == 1 {
+			mediaStopMu.Lock()
 			if err := mediaRecv.StartBySoundType(soundType); err != nil {
+				mediaStopMu.Unlock()
 				s.logger.Error("media receiver start failed", "err", err, "session_id", sessionID)
 				continue
 			}
 			if err := audioOut.EnsureContext(); err != nil {
-				_, _, _ = state.StopIfSession(sessionID)
+				stats, recvErr := stopPlaybackLocked()
+				mediaStopMu.Unlock()
 				s.logger.Error("audio output init failed", "err", err, "session_id", sessionID)
+				if recvErr != nil {
+					s.logger.Warn("media receiver error on stop", "err", recvErr, "session_id", sessionID)
+				}
+				logSessionStats(sessionID, stats)
 				continue
 			}
+			mediaStopMu.Unlock()
 		}
 
 		s.logger.Debug("scheduled playback start", "session_id", sessionID)
@@ -469,8 +511,16 @@ func (s *brsService) Run(ctx context.Context) error {
 					pcmBuf.Reset()
 				}
 				if err := audioOut.StartAt(t0, pcmBuf); err != nil {
-					_, _, _ = state.StopIfSession(sessionID)
+					prevID, _, ok := state.StopIfSession(sessionID)
+					if ok {
+						sessionID = prevID
+					}
+					stats, recvErr := stopPlaybackLocked()
 					s.logger.Error("audio output start failed", "err", err, "session_id", sessionID)
+					if recvErr != nil {
+						s.logger.Warn("media receiver error on stop", "err", recvErr, "session_id", sessionID)
+					}
+					logSessionStats(sessionID, stats)
 					return
 				}
 			}

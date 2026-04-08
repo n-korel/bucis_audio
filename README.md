@@ -157,5 +157,5 @@ sequenceDiagram
 - **`BRS_NAME`**: имя узла в логах, default `brs`
 - **`METRICS_ADDR`**: адрес назначения метрик, default = `CONTROL_ADDR`
 - **`METRICS_LISTEN_PORT`**: UDP порт для приёма команды `get_metrics`, default `8892`
-- **`METRICS_SEND_PORT`**: UDP порт назначения для отправки метрик, default `8892`
+- **`METRICS_SEND_PORT`**: UDP порт назначения для отправки метрик, default `0` (отправка отключена)
 - **`METRICS_REPLY_PORT`**: UDP порт ответа на `get_metrics`, default `8881`
