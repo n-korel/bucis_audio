@@ -99,3 +99,11 @@ func TestParseSoundStop(t *testing.T) {
 		t.Fatalf("Args %q", stop.Args)
 	}
 }
+
+func TestFormatSoundStartDefaultSessionIDZeros(t *testing.T) {
+	got := FormatSoundStart(1, 100, "")
+	want := "sound_start 1;100;00000000;"
+	if got != want {
+		t.Fatalf("FormatSoundStart: got %q want %q", got, want)
+	}
+}

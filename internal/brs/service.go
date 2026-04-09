@@ -505,14 +505,20 @@ func (s *brsService) Run(ctx context.Context) error {
 			continue
 		}
 
+		sessionID := start.SessionID
+		if sessionID == "" {
+			sessionID = fmt.Sprintf("%08x", s.deps.Now().UnixMilli()&0xffffffff)
+			s.logger.Warn("sound_start without session_id, generated synthetic", "session_id", sessionID)
+		}
+
 		t0 := start.T0
 		now := s.deps.Now().UnixMilli()
 		if now > t0 {
-			s.logger.Warn("late start", "behind_ms", now-t0, "session_id", start.SessionID)
+			s.logger.Warn("late start", "behind_ms", now-t0, "session_id", sessionID)
 		}
 
-		if start.SessionID == state.CurrentID() && start.SessionID != "" {
-			s.logger.Debug("duplicate sound_start ignored", "session_id", start.SessionID)
+		if sessionID == state.CurrentID() {
+			s.logger.Debug("duplicate sound_start ignored", "session_id", sessionID)
 			continue
 		}
 
@@ -521,7 +527,7 @@ func (s *brsService) Run(ctx context.Context) error {
 		stats, recvErr := stopPlaybackLocked()
 		mediaStopMu.Unlock()
 		if oldSessionID != "" {
-			s.logger.Warn("session replaced", "old_session_id", oldSessionID, "new_session_id", start.SessionID)
+			s.logger.Warn("session replaced", "old_session_id", oldSessionID, "new_session_id", sessionID)
 			if recvErr != nil {
 				s.logger.Warn("media receiver error on stop", "err", recvErr, "session_id", oldSessionID)
 			}
@@ -529,9 +535,8 @@ func (s *brsService) Run(ctx context.Context) error {
 			s.logger.Info("playback stopped due to reschedule")
 		}
 
-		sessionID := start.SessionID
 		soundType := start.Type
-		s.logger.Info("sound_start received", "session_id", start.SessionID, "type", start.Type)
+		s.logger.Info("sound_start received", "session_id", sessionID, "type", start.Type)
 
 		pcmBuf.Reset()
 
@@ -557,16 +562,12 @@ func (s *brsService) Run(ctx context.Context) error {
 
 		s.logger.Debug("scheduled playback start", "session_id", sessionID)
 		state.ScheduleStart(sch, sessionID, t0, func() {
-			mediaStopMu.Lock()
-			defer mediaStopMu.Unlock()
-
-			if !state.IsSession(sessionID) {
-				return
-			}
-
 			if !state.MarkPlaybackStartedIfSession(sessionID) {
 				return
 			}
+
+			mediaStopMu.Lock()
+			defer mediaStopMu.Unlock()
 
 			if soundType == 1 {
 				if s.deps.Now().UnixMilli() > t0 {

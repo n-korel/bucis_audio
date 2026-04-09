@@ -14,6 +14,7 @@ type State struct {
 	scheduledT0    int64
 	timer          *time.Timer
 	playbackActive bool
+	generation     uint64
 }
 
 func (s *State) Snapshot() (sessionID string, playbackActive bool) {
@@ -87,7 +88,15 @@ func (s *State) ScheduleStart(sch scheduler.Scheduler, sessionID string, t0 int6
 	}
 	s.sessionID = sessionID
 	s.scheduledT0 = t0
+	s.generation++
+	gen := s.generation
 	s.timer = sch.Schedule(t0, func() {
+		s.mu.Lock()
+		if s.generation != gen {
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
 		if !s.IsSession(sessionID) {
 			return
 		}

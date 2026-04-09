@@ -60,6 +60,7 @@ func Parse(b []byte) (start *SoundStart, stop *SoundStop, ok bool) {
 			return nil, nil, false
 		}
 
+		// Empty SessionID means a legacy packet without explicit session_id (BUCIS may omit it).
 		sessionID := ""
 		if len(parts) == 3 {
 			sessionID = parts[2]
@@ -82,8 +83,9 @@ func Parse(b []byte) (start *SoundStart, stop *SoundStop, ok bool) {
 
 func FormatSoundStart(soundType int, t0 int64, sessionID string) string {
 	msg := "sound_start " + strconv.Itoa(soundType) + ";" + strconv.FormatInt(t0, 10) + ";"
-	if sessionID != "" {
-		msg += sessionID + ";"
+	if sessionID == "" {
+		sessionID = "00000000"
 	}
+	msg += sessionID + ";"
 	return msg
 }

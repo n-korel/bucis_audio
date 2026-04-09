@@ -153,6 +153,7 @@ func (r *Receiver) Stop() (SessionStats, error) {
 		stats := r.stats
 		err := r.runErr
 		r.runErr = nil
+		r.playing = false
 		r.mu.Unlock()
 		return stats, err
 	}

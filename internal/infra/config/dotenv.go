@@ -36,7 +36,8 @@ func loadDotEnv() error {
 			}
 			k, v, ok := strings.Cut(line, "=")
 			if !ok {
-				continue
+				loadDotEnvErr = fmt.Errorf(".env line %q: missing '='", line)
+				return
 			}
 			k = strings.TrimSpace(k)
 			v = strings.TrimSpace(v)

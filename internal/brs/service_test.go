@@ -177,6 +177,67 @@ func TestServiceDuplicateSoundStartIgnored(t *testing.T) {
 	}
 }
 
+func TestServiceDuplicateSoundStartWithoutSessionIDIgnored(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newFakeControlReceiver()
+	defer func() { _ = ctrl.Close() }()
+
+	media := &fakeMediaReceiver{}
+	media.playing = true
+
+	now := time.Unix(1, 0)
+	media.lastPacket = now
+
+	svc := NewWithDeps(config.Brs{
+		ControlAddr:       "127.0.0.1",
+		ControlPort:       0,
+		MediaPort:         0,
+		MetricsListenPort: 0,
+		MetricsSendPort:   0,
+	}, "node", nil, Deps{
+		JoinControl: func(addr string, port int) (controlReceiver, error) { return ctrl, nil },
+		NewMedia:    func(mediaPort int) mediaReceiver { return media },
+		Now:         func() time.Time { return now },
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- svc.Run(ctx) }()
+
+	t0 := now.Add(-10 * time.Millisecond).UnixMilli()
+	line := "sound_start 2;" + strconv.FormatInt(t0, 10) + ";"
+
+	ctrl.Send([]byte(line))
+	ctrl.Send([]byte(line))
+
+	time.Sleep(150 * time.Millisecond)
+
+	media.mu.Lock()
+	stopAfterDuplicate := media.stopCalls
+	media.mu.Unlock()
+	if stopAfterDuplicate != 1 {
+		t.Fatalf("after duplicate sound_start without session_id: expected stopCalls=1, got %d", stopAfterDuplicate)
+	}
+
+	ctrl.Send([]byte("sound_stop"))
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	_ = ctrl.Close()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run() error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting service to stop")
+	}
+}
+
 func TestServiceIdleTimeoutStopsSession(t *testing.T) {
 	t.Parallel()
 
