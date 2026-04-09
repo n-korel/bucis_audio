@@ -20,9 +20,9 @@
 
 ### Два канала
 
-| Канал         | Порт | Протокол                          | Направление | Содержание                  |
-| ------------- | ---- | --------------------------------- | ----------- | --------------------------- |
-| Control-plane | 8889 | UDP broadcast                     | BUCIS → BRS | `sound_start`, `sound_stop` |
+| Канал         | Порт | Протокол                         | Направление | Содержание                  |
+| ------------- | ---- | -------------------------------- | ----------- | --------------------------- |
+| Control-plane | 8889 | UDP broadcast                    | BUCIS → BRS | `sound_start`, `sound_stop` |
 | Media-plane   | 5006 | RTP/UDP broadcast `10.10.10.255` | BUCIS → BRS | G.726 32 kbit/s             |
 
 ### Топология
@@ -37,14 +37,31 @@ graph TB
         BRS1[BRS-1]
     end
 
+    subgraph Receivers2["ВАГОН-2"]
+        BRS2[BRS-2]
+    end
 
+    subgraph Receivers3["ВАГОН-3"]
+        BRS3[BRS-3]
+    end
 
     BUCIS -->|"broadcast 10.10.10.255:8889
     sound_start / sound_stop"| BRS1
 
-
     BUCIS -->|"broadcast 10.10.10.255:5006
     RTP G.726"| BRS1
+
+    BUCIS -->|"broadcast 10.10.10.255:8889
+    sound_start / sound_stop"| BRS2
+
+    BUCIS -->|"broadcast 10.10.10.255:5006
+    RTP G.726"| BRS2
+
+    BUCIS -->|"broadcast 10.10.10.255:8889
+    sound_start / sound_stop"| BRS3
+
+    BUCIS -->|"broadcast 10.10.10.255:5006
+    RTP G.726"| BRS3
 
 ```
 
